@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "HR Copilot Workspace — Team ClosedAI",
   description:
-    "Enterprise AI HR Operations & Command Center: agentic multi-tool copilot for workforce, policy, payroll, and hiring.",
+    "Enterprise HR operations platform: employee database, payroll, time & attendance, ATS, performance, compliance, and an RBAC-aware AI copilot.",
 };
 
 export default function RootLayout({

@@ -1,19 +1,23 @@
 @import "tailwindcss";
 
+/*
+  Enterprise design system.
+  Neutral scale: zinc. Accent: a single restrained indigo, used sparingly for
+  primary actions, active nav, and the AI assistant. Status: emerald/amber/rose.
+  Everything else is grayscale, dense, and border-driven — no gradients, no glow.
+*/
 @theme {
-  --color-brand-50: #eef2ff;
-  --color-brand-100: #e0e7ff;
-  --color-brand-200: #c7d2fe;
-  --color-brand-300: #a5b4fc;
-  --color-brand-400: #818cf8;
-  --color-brand-500: #6366f1;
-  --color-brand-600: #4f46e5;
-  --color-brand-700: #4338ca;
-  --color-brand-800: #3730a3;
-  --color-brand-900: #312e81;
+  --color-accent-50: #eef2ff;
+  --color-accent-100: #e0e7ff;
+  --color-accent-200: #c7d2fe;
+  --color-accent-400: #818cf8;
+  --color-accent-500: #6366f1;
+  --color-accent-600: #4f46e5;
+  --color-accent-700: #4338ca;
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
 }
 
 :root {
@@ -28,25 +32,34 @@ body {
 body {
   margin: 0;
   font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
-  background-color: #f1f5f9;
-  color: #0f172a;
+  text-rendering: optimizeLegibility;
+  background-color: #fafafa; /* zinc-50 */
+  color: #18181b; /* zinc-900 */
 }
 
+/* Dense, unobtrusive scrollbars */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #cbd5e1 transparent;
+  scrollbar-color: #d4d4d8 transparent;
 }
 *::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background-color: #cbd5e1;
+  background-color: #d4d4d8;
   border-radius: 9999px;
 }
 *::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Crisp tabular numbers for data-dense tables */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 @keyframes pulse-dot {
@@ -56,5 +69,11 @@ body {
   }
   50% {
     opacity: 1;
+  }
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
   }
 }

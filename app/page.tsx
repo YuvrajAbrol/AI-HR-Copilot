@@ -1,10 +1,10 @@
-import { WorkspaceProvider } from "@/lib/store";
-import { Workspace } from "@/components/layout/Workspace";
+import { WorkspaceProvider } from "@/lib/workspace";
+import { Shell } from "@/components/layout/Shell";
 
 export default function Home() {
   return (
     <WorkspaceProvider>
-      <Workspace />
+      <Shell />
     </WorkspaceProvider>
   );
 }
