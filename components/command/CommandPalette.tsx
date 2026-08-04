@@ -8,7 +8,6 @@ import { MODULES } from "@/lib/modules";
 import { canAccessModule, visibleEmployees } from "@/lib/rbac";
 import { Avatar } from "@/components/ui/Avatar";
 import { KeyCap } from "@/components/ui/Misc";
-import type { ModuleId } from "@/lib/copilot";
 
 interface Item {
   id: string;
@@ -52,7 +51,7 @@ export function CommandPalette() {
       label: m.label,
       hint: m.description,
       run: () => {
-        setModule(m.id as ModuleId);
+        setModule(m.id);
         setPaletteOpen(false);
       },
     }));

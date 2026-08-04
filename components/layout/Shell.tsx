@@ -12,6 +12,8 @@ import { TimeModule } from "@/components/modules/TimeModule";
 import { AtsModule } from "@/components/modules/AtsModule";
 import { PerformanceModule } from "@/components/modules/PerformanceModule";
 import { ComplianceModule } from "@/components/modules/ComplianceModule";
+import { BenefitsModule } from "@/components/modules/BenefitsModule";
+import { TrainingModule } from "@/components/modules/TrainingModule";
 import { EmployeeSlideOver } from "@/components/modules/EmployeeSlideOver";
 import { CopilotDrawer } from "@/components/copilot/CopilotDrawer";
 import { CommandPalette } from "@/components/command/CommandPalette";
@@ -31,6 +33,10 @@ export function Shell() {
         return <PayrollModule />;
       case "time":
         return <TimeModule />;
+      case "benefits":
+        return <BenefitsModule />;
+      case "training":
+        return <TrainingModule />;
       case "ats":
         return <AtsModule />;
       case "performance":

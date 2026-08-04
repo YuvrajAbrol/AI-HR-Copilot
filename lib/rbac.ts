@@ -98,6 +98,8 @@ export function canAccessModule(role: Role, moduleId: string): boolean {
     "core-hr": ["admin", "manager", "employee"],
     payroll: ["admin", "manager", "employee"],
     time: ["admin", "manager", "employee"],
+    benefits: ["admin", "manager", "employee"],
+    training: ["admin", "manager", "employee"],
     ats: ["admin", "manager"],
     performance: ["admin", "manager", "employee"],
     compliance: ["admin"],

@@ -10,8 +10,9 @@ import {
   type ReactNode,
 } from "react";
 import { DATASET } from "./dataset";
-import { runCopilot, type ModuleId, type ReasoningStep, type FollowUp } from "./copilot";
+import { runCopilot, type ReasoningStep, type FollowUp } from "./copilot";
 import { canAccessModule } from "./rbac";
+import type { AppModuleId } from "./modules";
 import type { Employee, HrDataset, Role } from "./types";
 
 export interface ChatMessage {
@@ -32,8 +33,8 @@ interface WorkspaceState {
   currentUser: Employee;
   setRole: (r: Role) => void;
 
-  activeModule: ModuleId;
-  setModule: (m: ModuleId) => void;
+  activeModule: AppModuleId;
+  setModule: (m: AppModuleId) => void;
 
   selectedEmployeeId: string | null;
   openEmployee: (id: string) => void;
@@ -74,7 +75,7 @@ function welcome(): ChatMessage {
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const data = DATASET;
   const [role, setRoleState] = useState<Role>("admin");
-  const [activeModule, setActiveModule] = useState<ModuleId>("dashboard");
+  const [activeModule, setActiveModule] = useState<AppModuleId>("dashboard");
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -91,7 +92,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [data, selectedEmployeeId]
   );
 
-  const setModule = useCallback((m: ModuleId) => {
+  const setModule = useCallback((m: AppModuleId) => {
     setActiveModule(m);
     setSelectedEmployeeId(null);
   }, []);

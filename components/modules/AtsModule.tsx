@@ -6,7 +6,9 @@ import { motion } from "framer-motion";
 import { useWorkspace } from "@/lib/workspace";
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
+import { SlideOver } from "@/components/ui/SlideOver";
 import { StatTile, SectionHeader, ProgressBar } from "@/components/ui/Misc";
+import { CandidateSlideOver } from "./CandidateSlideOver";
 import { formatDate } from "@/lib/format";
 import type { Candidate, CandidateStage } from "@/lib/types";
 
@@ -22,6 +24,7 @@ const STAGE_TONE: Record<CandidateStage, string> = {
 export function AtsModule() {
   const { data } = useWorkspace();
   const [roleFilter, setRoleFilter] = useState("All");
+  const [selected, setSelected] = useState<Candidate | null>(null);
 
   const roles = useMemo(
     () => ["All", ...Array.from(new Set(data.candidates.map((c) => c.role)))],
@@ -74,7 +77,7 @@ export function AtsModule() {
               </div>
               <div className="flex flex-col gap-2 p-2">
                 {items.map((c) => (
-                  <CandidateCard key={c.id} candidate={c} />
+                  <CandidateCard key={c.id} candidate={c} onClick={() => setSelected(c)} />
                 ))}
                 {items.length === 0 && (
                   <p className="px-2 py-6 text-center text-[11px] text-zinc-400">Empty</p>
@@ -84,20 +87,25 @@ export function AtsModule() {
           );
         })}
       </div>
+
+      <SlideOver open={!!selected} onClose={() => setSelected(null)} width="max-w-xl">
+        {selected && <CandidateSlideOver candidate={selected} />}
+      </SlideOver>
     </div>
   );
 }
 
-function CandidateCard({ candidate }: { candidate: Candidate }) {
+function CandidateCard({ candidate, onClick }: { candidate: Candidate; onClick: () => void }) {
   const scoreTone = candidate.matchScore >= 90 ? "emerald" : candidate.matchScore >= 78 ? "accent" : candidate.matchScore >= 68 ? "amber" : "rose";
   return (
     <motion.div
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
-      className="rounded-md border border-zinc-200 bg-white p-2.5 shadow-sm"
+      onClick={onClick}
+      className="cursor-pointer rounded-md border border-zinc-200 bg-white p-2.5 shadow-sm transition-colors hover:border-accent-300 hover:bg-accent-50/30"
     >
       <div className="flex items-center gap-2">
-        <Avatar initials={candidate.initials} seed={candidate.name} size="sm" />
+        <Avatar initials={candidate.initials} seed={candidate.name} name={candidate.name} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium text-zinc-800">{candidate.name}</p>
           <p className="truncate text-[11px] text-zinc-400">{candidate.yearsExp} yrs · {candidate.location}</p>

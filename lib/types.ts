@@ -141,6 +141,13 @@ export type CandidateStage =
   | "Offer"
   | "Hired";
 
+export interface Scorecard {
+  interviewer: string;
+  focus: string;
+  rating: number; // 1..5
+  note: string;
+}
+
 export interface Candidate {
   id: string;
   name: string;
@@ -154,6 +161,12 @@ export interface Candidate {
   yearsExp: number;
   location: string;
   compliance: "Cleared" | "Pending" | "Flagged";
+  email: string;
+  phone: string;
+  expectedSalary: number;
+  summary: string;
+  skills: string[];
+  scorecards: Scorecard[];
 }
 
 // --------------------------- Payroll ----------------------------------------
@@ -177,6 +190,23 @@ export interface Expense {
   amount: number;
   date: string;
   status: RequestStatus;
+}
+
+// --------------------------- Timesheets ------------------------------------
+
+export interface Timesheet {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  initials: string;
+  department: Department;
+  weekOf: string;
+  regular: number;
+  overtime: number;
+  pto: number;
+  total: number;
+  status: RequestStatus;
+  submittedDate: string;
 }
 
 // --------------------------- Compliance -------------------------------------
@@ -207,6 +237,7 @@ export interface HrDataset {
   candidates: Candidate[];
   payrollRuns: PayrollRun[];
   expenses: Expense[];
+  timesheets: Timesheet[];
   auditLogs: AuditLog[];
   holidays: { date: string; name: string }[];
   roleUsers: Record<Role, string>; // role -> employeeId acting as the session user

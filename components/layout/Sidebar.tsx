@@ -8,21 +8,24 @@ import {
   Banknote,
   Briefcase,
   ShieldCheck,
+  HeartPulse,
+  GraduationCap,
   Bot,
   Command,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { MODULES } from "@/lib/modules";
-import type { ModuleId } from "@/lib/copilot";
+import { MODULES, type AppModuleId } from "@/lib/modules";
 import { canAccessModule } from "@/lib/rbac";
 import { useWorkspace } from "@/lib/workspace";
 import { KeyCap } from "@/components/ui/Misc";
 
-const ICONS: Record<ModuleId, LucideIcon> = {
+const ICONS: Record<AppModuleId, LucideIcon> = {
   dashboard: LayoutDashboard,
   "core-hr": Users,
   time: CalendarClock,
   performance: Target,
+  benefits: HeartPulse,
+  training: GraduationCap,
   payroll: Banknote,
   ats: Briefcase,
   compliance: ShieldCheck,

@@ -2,13 +2,13 @@
 
 import { useMemo, useState } from "react";
 import { createColumnHelper, type ColumnDef } from "@tanstack/react-table";
-import { ShieldAlert, Network } from "lucide-react";
+import { ShieldAlert, Network, Table2, ChevronRight, ChevronDown } from "lucide-react";
 import { useWorkspace } from "@/lib/workspace";
 import { visibleEmployees, canViewCompensation, ROLE_META } from "@/lib/rbac";
 import { DataTable } from "@/components/ui/DataTable";
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
-import { Tabs } from "@/components/ui/Tabs";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { SectionHeader, RbacNotice } from "@/components/ui/Misc";
 import { formatCurrency, mask } from "@/lib/format";
 import type { Employee } from "@/lib/types";
@@ -17,7 +17,7 @@ const col = createColumnHelper<Employee>();
 
 export function CoreHrModule() {
   const { role, currentUser, data, openEmployee } = useWorkspace();
-  const [tab, setTab] = useState("directory");
+  const [view, setView] = useState<"table" | "org">("table");
   const scope = useMemo(
     () => visibleEmployees(role, currentUser.id, data.employees),
     [role, currentUser.id, data.employees]
@@ -79,6 +79,28 @@ export function CoreHrModule() {
       <SectionHeader
         title="Employee Database"
         description={`${scope.length} record${scope.length === 1 ? "" : "s"} · ${ROLE_META[role].scope}`}
+        actions={
+          <div className="inline-flex rounded-md border border-zinc-200 bg-white p-0.5">
+            <button
+              type="button"
+              onClick={() => setView("table")}
+              className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                view === "table" ? "bg-zinc-900 text-white" : "text-zinc-500 hover:text-zinc-800"
+              }`}
+            >
+              <Table2 size={13} /> Table View
+            </button>
+            <button
+              type="button"
+              onClick={() => setView("org")}
+              className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                view === "org" ? "bg-zinc-900 text-white" : "text-zinc-500 hover:text-zinc-800"
+              }`}
+            >
+              <Network size={13} /> Org Chart Hierarchy
+            </button>
+          </div>
+        }
       />
 
       {role !== "admin" && (
@@ -90,18 +112,7 @@ export function CoreHrModule() {
         </RbacNotice>
       )}
 
-      <div className="mb-4">
-        <Tabs
-          active={tab}
-          onChange={setTab}
-          tabs={[
-            { id: "directory", label: "Directory", count: scope.length },
-            { id: "org", label: "Org Chart" },
-          ]}
-        />
-      </div>
-
-      {tab === "directory" && (
+      {view === "table" && (
         <DataTable
           columns={columns}
           data={scope}
@@ -110,7 +121,7 @@ export function CoreHrModule() {
         />
       )}
 
-      {tab === "org" && <OrgChart scope={scope} all={data.employees} onSelect={openEmployee} />}
+      {view === "org" && <OrgChart scope={scope} all={data.employees} onSelect={openEmployee} />}
     </div>
   );
 }
@@ -124,45 +135,91 @@ function OrgChart({
   all: Employee[];
   onSelect: (id: string) => void;
 }) {
-  const scopeIds = new Set(scope.map((e) => e.id));
-  const childrenOf = (id: string | null) =>
-    all.filter((e) => e.managerId === id && scopeIds.has(e.id));
+  const scopeIds = useMemo(() => new Set(scope.map((e) => e.id)), [scope]);
+  const nameById = useMemo(() => new Map(all.map((e) => [e.id, e])), [all]);
+
+  const childrenOf = (id: string | null) => all.filter((e) => e.managerId === id && scopeIds.has(e.id));
+
+  // Count all transitive reports within scope for node badges.
+  const totalReports = (id: string): number => {
+    const kids = childrenOf(id);
+    return kids.reduce((sum, k) => sum + 1 + totalReports(k.id), 0);
+  };
 
   const roots = scope.filter((e) => !e.managerId || !scopeIds.has(e.managerId ?? ""));
 
+  // Expanded by default down to the first couple of levels.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const Node = ({ emp, depth }: { emp: Employee; depth: number }) => {
     const reports = childrenOf(emp.id);
+    const hasReports = reports.length > 0;
+    const isCollapsed = collapsed.has(emp.id);
     return (
       <div>
-        <button
-          type="button"
-          onClick={() => onSelect(emp.id)}
-          style={{ marginLeft: depth * 20 }}
-          className="mb-1.5 flex w-full max-w-md items-center gap-2.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left transition-colors hover:border-accent-300 hover:bg-accent-50/40"
+        <div
+          style={{ marginLeft: depth * 22 }}
+          className="mb-1.5 flex max-w-lg items-center gap-1.5"
         >
-          <Avatar initials={emp.initials} seed={emp.name} size="sm" />
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-zinc-800">{emp.name}</p>
-            <p className="truncate text-xs text-zinc-400">{emp.title} · {emp.department}</p>
-          </div>
-          {reports.length > 0 && (
-            <span className="ml-auto rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
-              {reports.length}
-            </span>
-          )}
-        </button>
-        {reports.map((r) => (
-          <Node key={r.id} emp={r} depth={depth + 1} />
-        ))}
+          <button
+            type="button"
+            onClick={() => hasReports && toggle(emp.id)}
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${
+              hasReports ? "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700" : "invisible"
+            }`}
+            aria-label={isCollapsed ? "Expand" : "Collapse"}
+          >
+            {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+          </button>
+          <Tooltip content={<span className="block text-xs text-zinc-700">{emp.name} — reports to {emp.managerId ? nameById.get(emp.managerId)?.name ?? "—" : "Board"}</span>}>
+            <button
+              type="button"
+              onClick={() => onSelect(emp.id)}
+              className="flex flex-1 items-center gap-2.5 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-left transition-colors hover:border-accent-300 hover:bg-accent-50/40"
+            >
+              <Avatar initials={emp.initials} seed={emp.name} name={emp.name} size="sm" />
+              <span className="min-w-0">
+                <span className="block truncate text-sm font-medium text-zinc-800">{emp.name}</span>
+                <span className="block truncate text-xs text-zinc-400">{emp.title} · {emp.department}</span>
+              </span>
+              {hasReports && (
+                <span className="ml-auto flex items-center gap-1 whitespace-nowrap rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+                  {reports.length} direct · {totalReports(emp.id)} total
+                </span>
+              )}
+            </button>
+          </Tooltip>
+        </div>
+        {hasReports && !isCollapsed && reports.map((r) => <Node key={r.id} emp={r} depth={depth + 1} />)}
       </div>
     );
   };
 
   return (
     <div className="rounded-lg border border-zinc-200 bg-white p-4">
-      <p className="mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-800">
-        <Network size={15} className="text-zinc-400" /> Reporting Structure
-      </p>
+      <div className="mb-3 flex items-center justify-between">
+        <p className="flex items-center gap-2 text-sm font-semibold text-zinc-800">
+          <Network size={15} className="text-zinc-400" /> Reporting Structure
+        </p>
+        <div className="flex gap-1.5 text-xs">
+          <button onClick={() => setCollapsed(new Set())} className="rounded border border-zinc-200 px-2 py-1 text-zinc-500 hover:bg-zinc-50">
+            Expand all
+          </button>
+          <button
+            onClick={() => setCollapsed(new Set(all.filter((e) => childrenOf(e.id).length).map((e) => e.id)))}
+            className="rounded border border-zinc-200 px-2 py-1 text-zinc-500 hover:bg-zinc-50"
+          >
+            Collapse all
+          </button>
+        </div>
+      </div>
       <div className="overflow-x-auto">
         {roots.map((r) => (
           <Node key={r.id} emp={r} depth={0} />

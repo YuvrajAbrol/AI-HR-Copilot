@@ -10,14 +10,18 @@ const SIZES = {
 export function Avatar({
   initials,
   seed = "",
+  name,
   size = "sm",
 }: {
   initials: string;
   seed?: string;
+  /** Full name shown as a native tooltip on hover. Falls back to seed. */
+  name?: string;
   size?: keyof typeof SIZES;
 }) {
   return (
     <span
+      title={name ?? (seed || undefined)}
       className={`flex shrink-0 items-center justify-center rounded-full font-semibold ${initialsColor(
         seed || initials
       )} ${SIZES[size]}`}

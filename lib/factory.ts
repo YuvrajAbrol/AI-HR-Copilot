@@ -27,6 +27,8 @@ import type {
   PayrollRun,
   PtoRequest,
   Role,
+  Scorecard,
+  Timesheet,
   TrainingCourse,
 } from "./types";
 
@@ -463,6 +465,7 @@ export function buildDataset(): HrDataset {
     candidates: buildCandidates(),
     payrollRuns: buildPayrollRuns(employees),
     expenses: buildExpenses(employees),
+    timesheets: buildTimesheets(employees),
     auditLogs: buildAuditLogs(employees),
     holidays: [
       { date: "2026-09-07", name: "Labor Day" },
@@ -487,11 +490,36 @@ function buildCandidates(): Candidate[] {
   ];
   const stages: CandidateStage[] = ["Applied", "Screening", "Interview", "Offer", "Hired"];
   const sources = ["LinkedIn", "Referral", "Careers Page", "Recruiter", "Hackathon"];
+  const skillPool: Record<Department, string[]> = {
+    Engineering: ["TypeScript", "Go", "Kubernetes", "PostgreSQL", "React", "AWS", "gRPC", "Terraform", "Python", "Distributed Systems"],
+    Sales: ["Enterprise Sales", "SaaS", "Negotiation", "Salesforce", "Pipeline Mgmt", "Forecasting", "MEDDIC"],
+    Marketing: ["Positioning", "SEO", "Content", "Analytics", "Brand", "Demand Gen", "Figma"],
+    "Human Resources": ["Sourcing", "ATS", "Employer Branding", "Interviewing", "HRIS", "Compliance"],
+    Executive: ["Leadership", "Strategy", "P&L", "Operations"],
+  };
+  const focuses = ["System Design", "Coding", "Behavioral", "Culture Fit", "Domain Expertise", "Leadership"];
+  const noteBank = [
+    "Strong communicator, clear ownership of past projects.",
+    "Solid fundamentals; probe deeper on scale in next round.",
+    "Great culture add, collaborative and humble.",
+    "Impressive depth, moved fast through the exercise.",
+    "Some gaps in recent stack; coachable and eager.",
+    "Excellent stakeholder management examples.",
+  ];
   const candidates: Candidate[] = [];
   for (let i = 0; i < 22; i += 1) {
     const r = pick(roles);
     const first = pick(FIRST);
     const last = pick(LAST);
+    const pool = skillPool[r.dept];
+    const skills = Array.from(new Set(Array.from({ length: randInt(4, 6) }, () => pick(pool))));
+    const nScores = randInt(1, 4);
+    const scorecards: Scorecard[] = Array.from({ length: nScores }, () => ({
+      interviewer: `${pick(FIRST)} ${pick(LAST)[0]}.`,
+      focus: pick(focuses),
+      rating: randInt(3, 5),
+      note: pick(noteBank),
+    }));
     candidates.push({
       id: `CAND-${String(i + 1).padStart(3, "0")}`,
       name: `${first} ${last}`,
@@ -505,9 +533,49 @@ function buildCandidates(): Candidate[] {
       yearsExp: randInt(2, 14),
       location: pick(CITIES),
       compliance: chance(0.7) ? "Cleared" : chance(0.5) ? "Pending" : "Flagged",
+      email: `${first.toLowerCase()}.${last.toLowerCase().replace(/[^a-z]/g, "")}@email.com`,
+      phone: `+1 (${randInt(200, 989)}) 555-${String(randInt(100, 9999)).padStart(4, "0")}`,
+      expectedSalary: round(randInt(95000, 240000), 1000),
+      summary: `Experienced ${r.dept.toLowerCase()} professional, most recently focused on ${skills[0]} and ${skills[1] ?? "delivery"}. Seeking a ${r.role} position with high ownership and impact.`,
+      skills,
+      scorecards,
     });
   }
   return candidates;
+}
+
+// -------------------------- Timesheets -------------------------------------
+function buildTimesheets(employees: Employee[]): Timesheet[] {
+  const weeks = ["2026-07-06", "2026-07-13", "2026-07-20", "2026-07-27"];
+  const sheets: Timesheet[] = [];
+  // Roughly the first ~26 active employees submit timesheets across recent weeks.
+  const submitters = employees.filter((e) => e.status === "Active").slice(0, 26);
+  let n = 0;
+  for (const e of submitters) {
+    for (let w = 0; w < weeks.length; w += 1) {
+      // Skip some weeks to make the approval queue realistic.
+      if (w < weeks.length - 1 && chance(0.35)) continue;
+      const regular = 38 + randInt(0, 4);
+      const overtime = chance(0.4) ? randInt(1, 8) : 0;
+      const pto = chance(0.2) ? randInt(4, 8) : 0;
+      const isCurrent = w === weeks.length - 1;
+      sheets.push({
+        id: `TS-${String(++n).padStart(4, "0")}`,
+        employeeId: e.id,
+        employeeName: e.name,
+        initials: e.initials,
+        department: e.department,
+        weekOf: weeks[w],
+        regular,
+        overtime,
+        pto,
+        total: regular + overtime + pto,
+        status: isCurrent ? (chance(0.6) ? "Pending" : "Approved") : chance(0.85) ? "Approved" : chance(0.5) ? "Pending" : "Rejected",
+        submittedDate: iso(daysAgo(randInt(1, 20))),
+      });
+    }
+  }
+  return sheets;
 }
 
 // ---------------------------- Payroll --------------------------------------
