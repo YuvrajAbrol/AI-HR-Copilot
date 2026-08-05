@@ -1,6 +1,6 @@
 "use client"
 
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { create } from 'zustand'
 // Type-only import (erased at build time, so no runtime import cycle with
 // agent-runtime, which imports the store's `useChat` value).
@@ -57,6 +57,13 @@ interface ChatState {
   conversations: ConversationMeta[]
   activeId: string | null
 
+  // Per-chat history and backend binding (persisted to localStorage). The
+  // active chat's messages live in `activeConversation`; the others are parked
+  // here and swapped in on selection. `backendIdByChat` maps a UI chat to its
+  // reused backend conversation id so context survives across messages/reloads.
+  messagesByChat: Record<string, Message[]>
+  backendIdByChat: Record<string, string>
+
   // Run state
   isRunning: boolean
   error: string | null
@@ -97,6 +104,7 @@ interface ChatState {
   selectConversation: (id: string) => void
   deleteConversation: (id: string) => void
   reactToMessage: (messageId: string, reaction: 'up' | 'down') => void
+  hydrate: () => void
 }
 
 const MODELS = [
@@ -300,6 +308,13 @@ function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
+// Chat title from the first user message: first line, trimmed to a sane length.
+function titleFromText(text: string): string {
+  const firstLine = text.split('\n')[0].trim()
+  if (firstLine.length <= 48) return firstLine || 'New Chat'
+  return `${firstLine.slice(0, 45).trimEnd()}…`
+}
+
 function textFromLlmMessage(llmMessage: any): string {
   if (!llmMessage) return ''
   const content = llmMessage.content
@@ -328,6 +343,8 @@ export const useChat = create<ChatState>((set, get) => ({
   activeConversation: [],
   conversations: [],
   activeId: null,
+  messagesByChat: {},
+  backendIdByChat: {},
   isRunning: false,
   error: null,
 
@@ -362,14 +379,32 @@ export const useChat = create<ChatState>((set, get) => ({
       status: 'sent',
     }
 
-    set((state) => ({
-      activeConversation: [...state.activeConversation, userMessage],
-      isRunning: true,
-      error: null,
-      // Start a fresh reasoning stream for this turn.
-      activity: [],
-      activityStartedAt: now.getTime(),
-    }))
+    set((state) => {
+      // Ensure a chat exists (messages sent from the landing screen have no
+      // active chat yet) and give it a title from the first user message.
+      let activeId = state.activeId
+      let conversations = state.conversations
+      if (!activeId) {
+        activeId = `chat-${Date.now()}`
+        conversations = [{ id: activeId, title: titleFromText(trimmed) }, ...conversations]
+      } else if (state.activeConversation.every((m) => m.role !== 'user')) {
+        conversations = conversations.map((c) =>
+          c.id === activeId && c.title === 'New Chat'
+            ? { ...c, title: titleFromText(trimmed) }
+            : c,
+        )
+      }
+      return {
+        activeId,
+        conversations,
+        activeConversation: [...state.activeConversation, userMessage],
+        isRunning: true,
+        error: null,
+        // Start a fresh reasoning stream for this turn.
+        activity: [],
+        activityStartedAt: now.getTime(),
+      }
+    })
 
     sawAgentTextThisTurn = false
     streamingMessageId = null
@@ -427,58 +462,87 @@ export const useChat = create<ChatState>((set, get) => ({
   },
 
   newChat: () => {
+    const { activeId, activeConversation } = get()
     resetConnection(get, set)
     streamingMessageId = null
     useCanvas.getState().clear()
     const id = `chat-${Date.now()}`
-    set((state) => ({
-      activeConversation: [],
-      activeId: id,
-      conversations: [{ id, title: 'New Chat' }, ...state.conversations],
-      error: null,
-      isRunning: false,
-      activity: [],
-      activityStartedAt: null,
-    }))
+    set((state) => {
+      const messagesByChat = { ...state.messagesByChat }
+      if (activeId) messagesByChat[activeId] = activeConversation
+      return {
+        messagesByChat,
+        activeConversation: [],
+        activeId: id,
+        conversations: [{ id, title: 'New Chat' }, ...state.conversations],
+        error: null,
+        isRunning: false,
+        activity: [],
+        activityStartedAt: null,
+      }
+    })
   },
 
   selectConversation: (id: string) => {
+    const { activeId, activeConversation } = get()
+    if (id === activeId) return
     resetConnection(get, set)
     streamingMessageId = null
     useCanvas.getState().clear()
-    set({
-      activeId: id,
-      activeConversation: [],
-      error: null,
-      isRunning: false,
-      activity: [],
-      activityStartedAt: null,
+    set((state) => {
+      const messagesByChat = { ...state.messagesByChat }
+      if (activeId) messagesByChat[activeId] = activeConversation
+      return {
+        messagesByChat,
+        activeId: id,
+        // Restore this chat's history; the backend conversation is rebound
+        // lazily (reconnected) on the next message.
+        activeConversation: messagesByChat[id] ?? [],
+        backendConversationId: state.backendIdByChat[id] ?? null,
+        error: null,
+        isRunning: false,
+        activity: [],
+        activityStartedAt: null,
+      }
     })
   },
 
   deleteConversation: (id: string) => {
     const conversations = get().conversations.filter((c) => c.id !== id)
     const isActive = get().activeId === id
-    const activeId = isActive ? (conversations[0]?.id ?? null) : get().activeId
+    const nextActiveId = isActive ? (conversations[0]?.id ?? null) : get().activeId
     if (isActive) {
       resetConnection(get, set)
       streamingMessageId = null
       useCanvas.getState().clear()
     }
-    set({
-      conversations,
-      activeId,
-      ...(isActive
-        ? {
-            activeConversation: [],
-            error: null,
-            isRunning: false,
-            activity: [],
-            activityStartedAt: null,
-          }
-        : {}),
+    set((state) => {
+      const messagesByChat = { ...state.messagesByChat }
+      delete messagesByChat[id]
+      const backendIdByChat = { ...state.backendIdByChat }
+      delete backendIdByChat[id]
+      return {
+        conversations,
+        messagesByChat,
+        backendIdByChat,
+        activeId: nextActiveId,
+        ...(isActive
+          ? {
+              activeConversation: nextActiveId ? (messagesByChat[nextActiveId] ?? []) : [],
+              backendConversationId: nextActiveId
+                ? (backendIdByChat[nextActiveId] ?? null)
+                : null,
+              error: null,
+              isRunning: false,
+              activity: [],
+              activityStartedAt: null,
+            }
+          : {}),
+      }
     })
   },
+
+  hydrate: () => hydrateFromStorage(set),
 }))
 
 type Getter = typeof useChat.getState
@@ -608,8 +672,7 @@ function resetConnection(get: Getter, set: Setter) {
 
 async function ensureSocket(get: Getter, set: Setter): Promise<WebSocket> {
   const existing = get().socket
-  const conversationId = get().backendConversationId
-  if (existing && existing.readyState === WebSocket.OPEN && conversationId) {
+  if (existing && existing.readyState === WebSocket.OPEN && get().backendConversationId) {
     return existing
   }
   if (existing) {
@@ -620,8 +683,34 @@ async function ensureSocket(get: Getter, set: Setter): Promise<WebSocket> {
     }
   }
 
-  // 1) Create a backend conversation server-side (Azure LLM config + secrets
-  //    stay in the Next.js server process, never in the browser).
+  const activeId = get().activeId
+  const storedBackendId = (activeId && get().backendIdByChat[activeId]) || null
+
+  // 1) Reuse this chat's existing backend conversation if we have one — this
+  //    reconnects the WebSocket and keeps the agent's server-side context. If
+  //    the backend no longer has it (e.g. it was restarted with a fresh
+  //    workspace), fall through and create a new one; the UI history is
+  //    preserved locally regardless.
+  if (storedBackendId) {
+    try {
+      return await openBackendSocket(storedBackendId, get, set)
+    } catch (error) {
+      if (!(error as { notFound?: boolean })?.notFound) throw error
+    }
+  }
+
+  // 2) Create a backend conversation server-side (LLM config + secrets stay in
+  //    the Next.js server process, never in the browser) and bind it to this chat.
+  const newConversationId = await createBackendConversation()
+  if (activeId) {
+    set((state) => ({
+      backendIdByChat: { ...state.backendIdByChat, [activeId]: newConversationId },
+    }))
+  }
+  return openBackendSocket(newConversationId, get, set)
+}
+
+async function createBackendConversation(): Promise<string> {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -637,39 +726,51 @@ async function ensureSocket(get: Getter, set: Setter): Promise<WebSocket> {
     }
     throw new Error(detail)
   }
-  const { conversationId: newConversationId } = await res.json()
-  if (!newConversationId) throw new Error('Backend did not return a conversation id')
+  const { conversationId } = await res.json()
+  if (!conversationId) throw new Error('Backend did not return a conversation id')
+  return conversationId
+}
 
-  // 2) Open the event WebSocket directly to the backend and subscribe.
-  const url = `${WS_BASE}/sockets/events/${newConversationId}`
-  const ws = new WebSocket(url)
-  set({
-    socket: ws,
-    backendConversationId: newConversationId,
-    connectionError: null,
-  })
+// Open the event WebSocket for a backend conversation and subscribe. Resolves
+// once connected; rejects with `{ notFound: true }` if the backend reports the
+// conversation is gone (close code 4004) so the caller can recreate it.
+function openBackendSocket(
+  conversationId: string,
+  get: Getter,
+  set: Setter,
+): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${WS_BASE}/sockets/events/${conversationId}`)
+    let settled = false
+    set({ socket: ws, backendConversationId: conversationId, connectionError: null })
 
-  ws.onmessage = (event) => {
-    let parsed: any
-    try {
-      parsed = JSON.parse(event.data)
-    } catch {
-      return
-    }
-    handleServerEvent(parsed, get, set)
-  }
-  ws.onclose = () => {
-    if (get().socket === ws) set({ backendConnected: false })
-  }
-
-  await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try {
+        ws.close()
+      } catch {
+        /* ignore */
+      }
       reject(new Error('Timed out connecting to the HR Agent event stream'))
     }, CONNECT_TIMEOUT_MS)
+
+    ws.onmessage = (event) => {
+      let parsed: any
+      try {
+        parsed = JSON.parse(event.data)
+      } catch {
+        return
+      }
+      handleServerEvent(parsed, get, set)
+    }
+
     ws.onopen = () => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
-      // First-message auth when the backend requires a session key. Must be the
-      // first frame we send; ignored by the backend when no keys are configured.
+      // First-frame auth when the backend requires a session key; ignored when
+      // no keys are configured.
       if (WS_TOKEN) {
         try {
           ws.send(JSON.stringify({ type: 'auth', session_api_key: WS_TOKEN }))
@@ -678,19 +779,27 @@ async function ensureSocket(get: Getter, set: Setter): Promise<WebSocket> {
         }
       }
       set({ backendConnected: true })
-      resolve()
+      resolve(ws)
     }
-    ws.addEventListener(
-      'error',
-      () => {
-        clearTimeout(timer)
-        reject(new Error('Could not connect to the HR Agent event stream'))
-      },
-      { once: true },
-    )
-  })
 
-  return ws
+    ws.onclose = (ev) => {
+      if (!settled) {
+        settled = true
+        clearTimeout(timer)
+        if (ev.code === 4004) {
+          const err = new Error('Backend conversation not found') as Error & {
+            notFound: boolean
+          }
+          err.notFound = true
+          reject(err)
+        } else {
+          reject(new Error('Could not connect to the HR Agent event stream'))
+        }
+        return
+      }
+      if (get().socket === ws) set({ backendConnected: false })
+    }
+  })
 }
 
 function handleServerEvent(evt: any, get: Getter, set: Setter) {
@@ -791,6 +900,17 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
     markRunningStepsError(set, truncate(String(detail)))
     finalizeStreaming(set)
     set({ isRunning: false })
+    // Stale backend conversations keep the LLM config from when they were
+    // created. After switching providers (e.g. Groq → Ollama), reconnecting to
+    // an old id produces auth/provider errors. Drop the binding so the next
+    // message creates a fresh conversation with the current provider.
+    if (isStaleProviderError(detail)) {
+      invalidateBackendBinding(get, set)
+      appendSystem(
+        set,
+        'This chat was still bound to an old LLM provider. Send your message again — it will use the current provider (Ollama).',
+      )
+    }
     return
   }
 
@@ -871,7 +991,155 @@ function finishTurn(status: string, get: Getter, set: Setter) {
   }, 500)
 }
 
+// ---------------------------------------------------------------------------
+// Persistence: chat list, per-chat history, and per-chat backend binding are
+// saved to localStorage so closing the tab (or the whole app) and reopening it
+// restores the session. Ephemeral runtime state (socket, isRunning, activity)
+// is intentionally not persisted.
+// ---------------------------------------------------------------------------
+
+const PERSIST_KEY = 'hr-copilot:chats:v3'
+const PERSIST_KEY_LEGACY = ['hr-copilot:chats:v2', 'hr-copilot:chats:v1']
+
+interface StoredMessage extends Omit<Message, 'timestamp'> {
+  timestamp: number
+}
+
+interface PersistShape {
+  conversations: ConversationMeta[]
+  activeId: string | null
+  messagesByChat: Record<string, StoredMessage[]>
+  backendIdByChat: Record<string, string>
+}
+
+/** True when the error means this backend conversation's baked-in LLM is unusable. */
+function isStaleProviderError(detail: unknown): boolean {
+  const s = String(detail || '').toLowerCase()
+  return (
+    s.includes('invalid_api_key') ||
+    s.includes('invalid api key') ||
+    s.includes('authentication') ||
+    s.includes('llmauthenticationerror') ||
+    s.includes('resource_exhausted') ||
+    s.includes('ollamaexception') ||
+    s.includes('apiconnectionerror') ||
+    (s.includes('groqexception') && s.includes('api')) ||
+    (s.includes('badrequesterror') &&
+      (s.includes('api key') || s.includes('api_key') || s.includes('gemini')))
+  )
+}
+
+/** Drop the active chat's backend conversation binding and close the socket. */
+function invalidateBackendBinding(get: Getter, set: Setter) {
+  const activeId = get().activeId
+  resetConnection(get, set)
+  if (!activeId) return
+  set((state) => {
+    const backendIdByChat = { ...state.backendIdByChat }
+    delete backendIdByChat[activeId]
+    return { backendIdByChat, backendConversationId: null }
+  })
+}
+
+function serializeMessages(messages: Message[]): StoredMessage[] {
+  return messages.map((m) => ({
+    ...m,
+    timestamp: m.timestamp instanceof Date ? m.timestamp.getTime() : (m.createdAt ?? Date.now()),
+  }))
+}
+
+function reviveMessages(messages: StoredMessage[] | undefined): Message[] {
+  if (!Array.isArray(messages)) return []
+  return messages.map((m) => ({
+    ...m,
+    timestamp: new Date(typeof m.timestamp === 'number' ? m.timestamp : (m.createdAt ?? Date.now())),
+  }))
+}
+
+function persistState(state: ChatState) {
+  if (typeof window === 'undefined') return
+  // Fold the active chat's live messages back into the map before writing.
+  const messagesByChat: Record<string, StoredMessage[]> = {}
+  for (const [id, msgs] of Object.entries(state.messagesByChat)) {
+    messagesByChat[id] = serializeMessages(msgs)
+  }
+  if (state.activeId) {
+    messagesByChat[state.activeId] = serializeMessages(state.activeConversation)
+  }
+  const shape: PersistShape = {
+    conversations: state.conversations,
+    activeId: state.activeId,
+    messagesByChat,
+    backendIdByChat: state.backendIdByChat,
+  }
+  try {
+    window.localStorage.setItem(PERSIST_KEY, JSON.stringify(shape))
+  } catch {
+    /* quota / private mode — non-fatal */
+  }
+}
+
+let hydrated = false
+
+function hydrateFromStorage(set: Setter) {
+  if (typeof window === 'undefined' || hydrated) return
+  hydrated = true
+  let shape: PersistShape | null = null
+  let fromLegacy = false
+  try {
+    const raw = window.localStorage.getItem(PERSIST_KEY)
+    if (raw) {
+      shape = JSON.parse(raw)
+    } else {
+      // Migrate older persist keys: keep chat list + messages, but DROP backend
+      // conversation ids. Those bake in the LLM provider from creation time;
+      // reusing them after a provider switch (Ollama ↔ Gemini ↔ Groq) fails.
+      for (const key of PERSIST_KEY_LEGACY) {
+        const legacy = window.localStorage.getItem(key)
+        if (!legacy) continue
+        shape = JSON.parse(legacy)
+        fromLegacy = true
+        window.localStorage.removeItem(key)
+        break
+      }
+    }
+  } catch {
+    shape = null
+  }
+  if (!shape) return
+
+  const messagesByChat: Record<string, Message[]> = {}
+  for (const [id, msgs] of Object.entries(shape.messagesByChat || {})) {
+    messagesByChat[id] = reviveMessages(msgs)
+  }
+  const activeId = shape.activeId ?? null
+  // Fresh provider bindings after migration; keep them for same-session v2 loads.
+  const backendIdByChat = fromLegacy ? {} : shape.backendIdByChat || {}
+  set({
+    conversations: shape.conversations || [],
+    activeId,
+    messagesByChat,
+    backendIdByChat,
+    activeConversation: activeId ? (messagesByChat[activeId] ?? []) : [],
+    backendConversationId: activeId ? (backendIdByChat[activeId] ?? null) : null,
+  })
+}
+
+// Debounced write on any relevant state change. Runs once per module load.
+if (typeof window !== 'undefined') {
+  let writeTimer: ReturnType<typeof setTimeout> | undefined
+  useChat.subscribe((state) => {
+    clearTimeout(writeTimer)
+    writeTimer = setTimeout(() => persistState(state), 250)
+  })
+}
+
 export function ChatProvider({ children }: { children: ReactNode }) {
+  // Restore the persisted session once, on the client, after mount to avoid an
+  // SSR/CSR hydration mismatch.
+  useEffect(() => {
+    useChat.getState().hydrate()
+  }, [])
   return children
 }
 

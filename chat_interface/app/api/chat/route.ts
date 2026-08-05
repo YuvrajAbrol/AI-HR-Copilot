@@ -63,21 +63,54 @@ function buildMcpConfig(): Record<string, unknown> {
   }
 }
 
-// Active LLM provider. Testing default is "groq" (free, fast, tool-calling +
-// streaming, no prepay quota walls). Flip to "openai" or "azure" for the final
-// build by setting LLM_PROVIDER and pasting the key into .env.local — no code
-// change required.
-const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'groq').toLowerCase()
+// Active LLM provider. Testing default is "ollama" (fully local, unlimited,
+// zero-cost, no auth). Alt testing: "groq"/"gemini". Flip to "openai" or "azure"
+// for the final build by setting LLM_PROVIDER and pasting the key into
+// .env.local — no code change required.
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase()
 
 // The `llm` block sent to the backend. The model *prefix* selects the provider
 // client inside the backend's LiteLLM layer:
-//   - "groq/<model>"        → Groq (testing; free tier, OpenAI-compatible)
+//   - "ollama_chat/<model>" → local Ollama (testing; unlimited, no key, tools)
+//   - "groq/<model>"        → Groq (alt testing; free tier, OpenAI-compatible)
 //   - "gemini/<model>"      → Google Gemini (alt testing)
 //   - "<model>"             → OpenAI (final; e.g. gpt-4o)
 //   - "azure/<deployment>"  → Azure OpenAI (final; enterprise)
 type LlmConfig = Record<string, unknown>
 
 function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
+  if (LLM_PROVIDER === 'ollama') {
+    // Local Ollama via LiteLLM. We use the "ollama_chat/" prefix (Ollama's
+    // /api/chat endpoint) rather than legacy "ollama/" (/api/generate): only
+    // ollama_chat does NATIVE function/tool calling, which the HR agent needs to
+    // actually execute the MCP tools. The prefix carries the provider, so the
+    // backend passes `base_url` straight through as LiteLLM's `api_base`. No API
+    // key: Ollama has no auth and the backend's api_key is optional (nothing to
+    // bypass). Set OLLAMA_MODEL without a prefix — the route adds "ollama_chat/".
+    const model = process.env.OLLAMA_MODEL || 'llama3.1'
+    const apiBase =
+      process.env.OLLAMA_API_BASE || process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
+    // LiteLLM's static metadata reports an 8k window for ollama/llama3.1, which
+    // trips HRAgents' 16k minimum context-window guard. llama3.1 actually
+    // supports up to 128k, so declare the real window explicitly — the backend
+    // trusts `max_input_tokens` over LiteLLM's metadata. Override via env.
+    const maxInputTokens = Number(process.env.OLLAMA_MAX_INPUT_TOKENS || '32768')
+    return {
+      llm: {
+        usage_id: 'agent',
+        model: `ollama_chat/${model}`,
+        // Maps to LiteLLM's api_base so requests route to the local daemon.
+        base_url: apiBase,
+        max_input_tokens: maxInputTokens,
+        // The backend defaults reasoning_effort="high", which LiteLLM turns into
+        // Ollama's `think` flag — llama3.1 rejects it ("does not support
+        // thinking"). Null disables reasoning so the request is a plain chat
+        // completion (tool calling + streaming still work).
+        reasoning_effort: null,
+      },
+    }
+  }
+
   if (LLM_PROVIDER === 'groq') {
     const apiKey = process.env.GROQ_API_KEY
     // Llama 3.3 70B is a strong, tool-calling-capable Groq model. Override with
@@ -175,28 +208,34 @@ function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
 // Appended to the backend's built-in system prompt via agent_context so we keep
 // the framework's tool-use/security scaffolding and layer the HR identity,
 // scope limits, grounding rules, and human-in-the-loop policy on top.
-const HR_SYSTEM_SUFFIX = `You are the AI HR Copilot, an assistant built exclusively for Human Resources professionals at this company. Your job is to help HR staff handle leave/PTO questions, benefits, onboarding, employee ticket triage, policy Q&A, and drafting HR communications.
+const HR_SYSTEM_SUFFIX = `You are the AI HR Copilot for authorized HR staff at this company. Help with employee lookups, compensation, PTO/leave, benefits, org structure, policy Q&A, ticket triage, onboarding/offboarding, and drafting HR communications.
 
-SCOPE — stay in your lane:
-- Only help with HR-related work. This includes employee data lookups, company policies/benefits, PTO/leave, onboarding/offboarding, ticket triage, and drafting HR messages.
-- If asked to do something outside HR (write code, general trivia, unrelated personal advice, tasks for other departments), politely decline in one sentence and steer back to how you can help with HR. Do not attempt the off-topic task.
+AUDIENCE — the user is authorized HR:
+- They may view employee records for HR work (profile, salary, PTO, benefits, org chart). Never refuse an HR lookup on privacy grounds, and never ask them to re-confirm they are HR.
+- Look data up with tools, then answer. Do not lecture about confidentiality.
 
-GROUNDING — never fabricate:
-- Never invent employee data, PTO balances, salaries, org structure, dates, or policy specifics. State facts only from tool results or provided documents.
-- If you don't have the data, say so plainly and offer to look it up with the available tools.
-- When answering from policy documents, cite the source (document/section) you relied on.
+SCOPE:
+- Stay in HR. For off-topic asks (code, trivia, unrelated advice), decline in one short sentence and offer an HR alternative.
 
-HUMAN-IN-THE-LOOP — you draft, a human approves:
-- You may freely READ data to answer questions.
-- To SEND a communication, call the matching action tool with a complete, ready-to-send draft: use "send_email" for email, "send_slack_message" for Slack, and "send_teams_message" for Microsoft Teams. These tools do NOT send immediately — the draft is placed on the HR user's Side Canvas and is only delivered after they click "Approve & Send".
-- After calling a send tool, tell the user you have PREPARED the message and placed it on the canvas for their review and approval. Never claim it has already been sent, and never take irreversible actions on your own.
-- For other changes (ticket updates, record changes) where no tool exists yet, present the proposed change and ask the user to confirm; do not fabricate a completed action.
+GROUNDING:
+- Never invent employee facts, salaries, PTO, org structure, dates, or policy text. Use tools first for employee questions (employee_lookup, pto_balance, org_chart, benefits_lookup, policy_search), then answer only from tool results.
+- If a field is missing from the tool result, say so plainly — do not invent it and do not refuse as a privacy matter.
+- Cite policy document/section when answering from policies.
+
+RESPONSE STYLE:
+- Lead with the answer in the first sentence. Keep replies short and skimmable (usually 2–6 sentences or a tight bullet list).
+- On greetings ("hi", "hello"), reply in 1–2 warm sentences and offer 2–3 concrete examples of what you can look up — no readiness check-ins ("confirm when you are ready").
+- After a lookup, state the key fact(s) clearly (name numbers with units, e.g. "$165,000 / year" or "12 PTO days remaining"). Add one short helpful follow-up only if useful.
+- Do not narrate your process ("I will now look that up", "Let me check"). Just use the tool and answer.
+- Do not dump raw JSON or tool payloads into the chat.
+
+HUMAN-IN-THE-LOOP:
+- Reads/lookups are free — no approval needed.
+- To SEND email/Slack/Teams, call send_email / send_slack_message / send_teams_message with a complete draft. These do NOT send immediately; tell the user you prepared it on the Side Canvas for Approve & Send. Never claim it was already sent.
+- For other write actions without a tool, propose the change and ask for confirmation.
 
 CONFIDENTIALITY:
-- Treat all employee information as sensitive PII. Share only what is necessary to answer the question at hand and only with the HR user you are assisting.
-
-TONE:
-- Professional, concise, and empathetic. Prefer short, skimmable answers and clearly labeled drafts.`
+- Answer the HR user fully for what they asked; do not volunteer extra sensitive fields they did not request.`
 
 // Response tuning. Low temperature favors accuracy/consistency for HR facts.
 // Overridable via env without code changes.

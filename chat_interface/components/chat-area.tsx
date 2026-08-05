@@ -27,7 +27,15 @@ export function ChatArea() {
   const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH)
   const [isDragging, setIsDragging] = useState(false)
   const [agent, setAgent] = useState(AGENTS[0])
+  // This console is fully client-side (persisted chat state, live WebSocket,
+  // Radix menus whose useId ids differ between SSR and the client). Rendering it
+  // only after mount makes the server and first client render identical (both
+  // the placeholder below), eliminating React hydration mismatches. There is no
+  // SSR/SEO value to preserve here.
+  const [mounted, setMounted] = useState(false)
   const inChat = activeConversation.length > 0
+
+  useEffect(() => setMounted(true), [])
 
   useEffect(() => {
     if (!isDragging) return
@@ -60,6 +68,12 @@ export function ChatArea() {
     } catch {
       toast.error("Could not copy link")
     }
+  }
+
+  // Server + first client render: a plain shell (no Radix/useId) so hydration
+  // matches. The full console renders once mounted.
+  if (!mounted) {
+    return <div className="flex h-screen w-full overflow-hidden bg-background" aria-hidden />
   }
 
   return (

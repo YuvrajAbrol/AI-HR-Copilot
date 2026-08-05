@@ -20,6 +20,9 @@ EMPLOYEES: list[dict[str, Any]] = [
         "location": "Seattle, WA",
         "start_date": "2021-03-15",
         "employment_type": "Full-time",
+        "salary": 165000,
+        "currency": "USD",
+        "pay_frequency": "annual",
         "pto": {
             "accrual_days_per_year": 20,
             "used_days": 8,
@@ -44,6 +47,9 @@ EMPLOYEES: list[dict[str, Any]] = [
         "location": "Austin, TX",
         "start_date": "2022-09-01",
         "employment_type": "Full-time",
+        "salary": 142000,
+        "currency": "USD",
+        "pay_frequency": "annual",
         "pto": {
             "accrual_days_per_year": 18,
             "used_days": 15,
@@ -68,6 +74,9 @@ EMPLOYEES: list[dict[str, Any]] = [
         "location": "Seattle, WA",
         "start_date": "2019-01-07",
         "employment_type": "Full-time",
+        "salary": 210000,
+        "currency": "USD",
+        "pay_frequency": "annual",
         "pto": {
             "accrual_days_per_year": 25,
             "used_days": 10,
@@ -92,6 +101,9 @@ EMPLOYEES: list[dict[str, Any]] = [
         "location": "Remote (CA)",
         "start_date": "2023-06-12",
         "employment_type": "Full-time",
+        "salary": 128000,
+        "currency": "USD",
+        "pay_frequency": "annual",
         "pto": {
             "accrual_days_per_year": 18,
             "used_days": 4,
@@ -116,6 +128,9 @@ EMPLOYEES: list[dict[str, Any]] = [
         "location": "Seattle, WA",
         "start_date": "2017-11-20",
         "employment_type": "Full-time",
+        "salary": 275000,
+        "currency": "USD",
+        "pay_frequency": "annual",
         "pto": {
             "accrual_days_per_year": 28,
             "used_days": 6,

@@ -5,6 +5,7 @@ import {
   Building2,
   CalendarDays,
   CheckCircle2,
+  DollarSign,
   FileText,
   Mail,
   MapPin,
@@ -103,8 +104,21 @@ function Panel({ children, className }: { children: React.ReactNode; className?:
 // ---------------------------------------------------------------------------
 // Module renderers (keyed by tool result shape)
 // ---------------------------------------------------------------------------
+function formatSalary(amount: unknown, currency?: string, frequency?: string): string | undefined {
+  if (amount == null || amount === "") return undefined
+  const n = Number(amount)
+  if (!Number.isFinite(n)) return String(amount)
+  const money = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: currency || "USD",
+    maximumFractionDigits: 0,
+  }).format(n)
+  return frequency ? `${money} / ${frequency}` : money
+}
+
 function EmployeeProfile({ data }: { data: any }) {
   const e = data?.employee ?? {}
+  const salary = formatSalary(e.salary, e.currency, e.pay_frequency)
   return (
     <div className="flex flex-col gap-3">
       <Panel>
@@ -119,6 +133,7 @@ function EmployeeProfile({ data }: { data: any }) {
           <Field icon={Mail} label="Email" value={e.email} />
           <Field icon={CalendarDays} label="Start date" value={e.start_date} />
           <Field label="Employee ID" value={e.id} />
+          {salary && <Field icon={DollarSign} label="Salary" value={salary} />}
         </div>
       </Panel>
     </div>

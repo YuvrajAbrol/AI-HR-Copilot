@@ -125,8 +125,10 @@ def _not_found(query: str) -> dict[str, Any]:
 def employee_lookup(name: str) -> dict[str, Any]:
     """Look up an employee's core profile by full name or employee ID.
 
-    Returns identity, role, department, manager, location, and start date.
-    Read-only. Use this to answer "who is X" / "what team is X on" questions.
+    Returns identity, role, department, manager, location, start date, and
+    compensation (salary, currency, pay frequency). Read-only. Use this for
+    "who is X", "what team is X on", and "what is X's salary" questions from
+    authorized HR users.
     """
     emp = BACKEND.find_employee(name)
     if not emp:
@@ -143,6 +145,9 @@ def employee_lookup(name: str) -> dict[str, Any]:
             "location": emp["location"],
             "start_date": emp["start_date"],
             "employment_type": emp["employment_type"],
+            "salary": emp.get("salary"),
+            "currency": emp.get("currency", "USD"),
+            "pay_frequency": emp.get("pay_frequency", "annual"),
         },
         "_canvas": {"module": "employee_profile", "title": f"{emp['name']} — Profile"},
     }
