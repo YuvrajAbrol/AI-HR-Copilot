@@ -1,0 +1,145 @@
+# AI HR Copilot — Startup Guide
+
+How to boot the whole system on Windows (PowerShell). There are **two long‑running
+processes**: the Python **backend** (HRAgents agent server) and the Next.js
+**frontend** (chat UI). The HR data tools (`hr-mcp`) start **automatically** as a
+subprocess of the backend — you don't launch them yourself.
+
+```
+ai-test-env/
+├─ HRAgent_Main/     ← backend (FastAPI agent server) — Terminal 1
+├─ chat_interface/   ← frontend (Next.js UI)          — Terminal 2
+└─ hr_mcp/           ← HR data tools (auto-spawned by the backend)
+```
+
+---
+
+## First-time setup (once per machine)
+
+Run these once. If you've already used the app, skip to **Daily boot-up**.
+
+1. **Backend Python environment** (needs [`uv`](https://docs.astral.sh/uv/) and Python 3.13):
+
+   ```powershell
+   cd "C:\Users\ishaa\OneDrive - UW\Academic\Coding\ai-test-env\HRAgent_Main"
+   uv sync
+   ```
+
+   This creates `HRAgent_Main\.venv` with all backend deps (including `fastmcp`,
+   which `hr-mcp` needs).
+
+2. **Frontend Node dependencies** (needs Node 18+):
+
+   ```powershell
+   cd "C:\Users\ishaa\OneDrive - UW\Academic\Coding\ai-test-env\chat_interface"
+   npm install
+   ```
+
+3. **Frontend environment file** — `chat_interface\.env.local` already exists and
+   is configured for **Groq** (free). Confirm it contains a working key:
+
+   ```
+   LLM_PROVIDER=groq
+   GROQ_API_KEY=gsk_...
+   GROQ_MODEL=llama-3.3-70b-versatile
+   ```
+
+   Get a free key at <https://console.groq.com/keys> if the current one stops
+   working. (To switch to OpenAI/Azure later, see **Switching LLM provider**.)
+
+---
+
+## Daily boot-up (every time)
+
+Open **two** PowerShell terminals.
+
+### Terminal 1 — Backend (start this first)
+
+```powershell
+cd "C:\Users\ishaa\OneDrive - UW\Academic\Coding\ai-test-env\HRAgent_Main"
+.\start_server.ps1
+```
+
+Wait until you see: `Uvicorn running on http://127.0.0.1:8001`.
+
+> Always use `start_server.ps1` — it forces UTF-8 mode (`PYTHONUTF8=1`), without
+> which the backend crashes on emojis/em-dashes on Windows.
+
+### Terminal 2 — Frontend
+
+```powershell
+cd "C:\Users\ishaa\OneDrive - UW\Academic\Coding\ai-test-env\chat_interface"
+npm run dev
+```
+
+Wait until you see: `Ready` and `Local: http://localhost:3000`.
+
+### Open the app
+
+Go to **<http://localhost:3000>** in your browser. Start a new chat and try:
+
+- `What is Sarah Chen's PTO balance?` → PTO card appears in the Side Canvas.
+- `Show me Marcus Johnson's org chart` → org-chart module.
+- `Draft an email to sarah.chen@example.com about the PTO policy` → an
+  **Approve & Send** card appears on the canvas (nothing sends until you click).
+
+---
+
+## Shutting down
+
+In each terminal press **Ctrl+C**. That's it — closing the terminals also stops
+the processes.
+
+---
+
+## Troubleshooting
+
+- **UI error "Could not connect / create conversation"** → the backend (Terminal 1)
+  isn't running or didn't finish starting. Confirm `http://127.0.0.1:8001` is up.
+- **`[winerror 10048] only one usage of each socket address`** → an old backend is
+  still holding port 8001. Find and stop it, then restart:
+
+  ```powershell
+  Get-NetTCPConnection -LocalPort 8001 | Select-Object -Expand OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force }
+  ```
+
+- **Port 3000 in use / "Unable to acquire lock"** → another `next dev` is already
+  running. Either use the URL it printed, or stop stray Node dev servers:
+
+  ```powershell
+  Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -like '*next*dev*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  ```
+
+- **`429 RESOURCE_EXHAUSTED` / rate limit** → the LLM key is out of quota. Get a
+  fresh Groq key and update `GROQ_API_KEY` in `.env.local`, then **restart the
+  frontend** (env is only read at startup).
+- **Changed `.env.local`?** → restart Terminal 2 (`npm run dev`). Code changes hot-
+  reload, but env changes do not.
+- **Side Canvas / tools not working** → ensure `hr_mcp` deps exist in the backend
+  venv (`uv sync` in `HRAgent_Main`). The backend logs a `[hr-mcp] disabled: ...`
+  warning if it can't find the tool server or its Python.
+
+---
+
+## Optional: command-line smoke test
+
+Verifies the backend + agent + tools without the browser (needs both servers up):
+
+```powershell
+cd "C:\Users\ishaa\OneDrive - UW\Academic\Coding\ai-test-env\chat_interface"
+node scripts/hr-test.mjs "What is Sarah Chen's PTO balance?"
+```
+
+You should see `ACTION → pto_balance`, `OBSERVATION ←`, and a grounded `FINAL:` answer.
+
+---
+
+## Switching LLM provider (Groq → OpenAI / Azure)
+
+No code changes — edit `chat_interface\.env.local`, then restart the frontend:
+
+- **OpenAI:** `LLM_PROVIDER=openai`, set `OPENAI_API_KEY=sk-...` (model `OPENAI_MODEL`, default `gpt-4o`).
+- **Azure OpenAI:** `LLM_PROVIDER=azure`, set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
+  `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`.
+
+See `chat_interface\.env.example` for the full annotated list.
