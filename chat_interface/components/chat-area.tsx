@@ -7,6 +7,7 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { ChatLanding } from "@/components/chat-landing"
 import { ChatConversation } from "@/components/chat-conversation"
 import { AgentExecutionPanel, AgentActivityToggle } from "@/components/agent-execution-panel"
+import { SideCanvas, CanvasToggle } from "@/components/side-canvas"
 import { OptionMenu } from "@/components/option-menu"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -169,6 +170,7 @@ export function ChatArea() {
           </div>
 
           <div className="flex items-center gap-2">
+            <CanvasToggle />
             <AgentActivityToggle />
             {inChat ? (
               <>
@@ -229,6 +231,7 @@ export function ChatArea() {
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
             {inChat ? <ChatConversation /> : <ChatLanding />}
           </div>
+          <SideCanvas />
           <AgentExecutionPanel />
         </div>
       </main>

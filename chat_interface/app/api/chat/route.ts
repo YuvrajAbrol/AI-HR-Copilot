@@ -1,117 +1,362 @@
 import { NextRequest, NextResponse } from 'next/server'
+import path from 'node:path'
+import fs from 'node:fs'
 
-const OPENHANDS_AGENT_URL = process.env.OPENHANDS_AGENT_URL || 'http://127.0.0.1:8001/run'
-const OPENHANDS_AGENT_HEALTH_URL = OPENHANDS_AGENT_URL.replace(/\/run$/, '/health')
+// Server-side base URL for the HRAgents agent server. Secrets (the LLM API
+// key) only ever live in this Next.js server process — they are never sent to
+// the browser. The browser talks to the backend directly only for the
+// (secret-free) event WebSocket.
+const HRAGENT_API_URL = (process.env.HRAGENT_API_URL || 'http://127.0.0.1:8001').replace(/\/$/, '')
 
-interface AgentServiceResponse {
-  status?: string
-  message?: string
-  workspace?: string
-  detail?: string
-  metadata?: {
-    files?: string[]
-    artifacts?: unknown[]
-    tool_calls?: unknown[]
+// Relative paths resolve against the backend process's working directory
+// (the HRAgent_Main folder). Absolute paths also work.
+const WORKSPACE_DIR = process.env.HRAGENT_WORKSPACE_DIR || 'workspace'
+
+// Optional backend auth. When the HRAgents server is started with
+// SESSION_API_KEY set, every /api/* call must carry X-Session-API-Key. We keep
+// that key server-side here so it is never exposed to the browser. Empty =
+// backend is open (local testing default).
+const SESSION_API_KEY = process.env.HRAGENT_SESSION_API_KEY || ''
+
+// Base headers for server-to-backend REST calls, including auth when configured.
+function backendHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra }
+  if (SESSION_API_KEY) headers['X-Session-API-Key'] = SESSION_API_KEY
+  return headers
+}
+
+// ---------------------------------------------------------------------------
+// hr-mcp: read-only HR data tools (Azure SQL + AI Search, mock-backed for now)
+// ---------------------------------------------------------------------------
+// The backend spawns the hr-mcp server as an MCP stdio subprocess using the
+// backend's venv Python (so fastmcp + deps resolve). Paths default relative to
+// the repo layout and are overridable via env. Set HR_MCP_ENABLED=false to run
+// the agent without HR tools.
+const HR_MCP_ENABLED = (process.env.HR_MCP_ENABLED ?? 'true').toLowerCase() !== 'false'
+const REPO_ROOT = path.resolve(process.cwd(), '..')
+const HR_MCP_PYTHON =
+  process.env.HR_MCP_PYTHON ||
+  path.join(REPO_ROOT, 'HRAgent_Main', '.venv', 'Scripts', 'python.exe')
+const HR_MCP_DIR = process.env.HR_MCP_DIR || path.join(REPO_ROOT, 'hr_mcp')
+const HR_MCP_SERVER = process.env.HR_MCP_SERVER || path.join(HR_MCP_DIR, 'server.py')
+const HR_MCP_DATA_BACKEND = process.env.HR_MCP_DATA_BACKEND || 'mock'
+
+// Build the agent.mcp_config map. Empty when disabled or the server/python is
+// missing (so the agent still runs as a plain conversational assistant).
+function buildMcpConfig(): Record<string, unknown> {
+  if (!HR_MCP_ENABLED) return {}
+  if (!fs.existsSync(HR_MCP_SERVER) || !fs.existsSync(HR_MCP_PYTHON)) {
+    console.warn(
+      `[hr-mcp] disabled: missing ${!fs.existsSync(HR_MCP_PYTHON) ? HR_MCP_PYTHON : HR_MCP_SERVER}`,
+    )
+    return {}
+  }
+  return {
+    hr: {
+      transport: 'stdio',
+      command: HR_MCP_PYTHON,
+      args: [HR_MCP_SERVER],
+      cwd: HR_MCP_DIR,
+      env: { HR_MCP_DATA_BACKEND },
+    },
   }
 }
 
-export async function GET() {
-  try {
-    const healthResponse = await fetch(OPENHANDS_AGENT_HEALTH_URL)
-    const healthBody = await healthResponse.text()
+// Active LLM provider. Testing default is "groq" (free, fast, tool-calling +
+// streaming, no prepay quota walls). Flip to "openai" or "azure" for the final
+// build by setting LLM_PROVIDER and pasting the key into .env.local — no code
+// change required.
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'groq').toLowerCase()
 
-    if (!healthResponse.ok) {
+// The `llm` block sent to the backend. The model *prefix* selects the provider
+// client inside the backend's LiteLLM layer:
+//   - "groq/<model>"        → Groq (testing; free tier, OpenAI-compatible)
+//   - "gemini/<model>"      → Google Gemini (alt testing)
+//   - "<model>"             → OpenAI (final; e.g. gpt-4o)
+//   - "azure/<deployment>"  → Azure OpenAI (final; enterprise)
+type LlmConfig = Record<string, unknown>
+
+function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
+  if (LLM_PROVIDER === 'groq') {
+    const apiKey = process.env.GROQ_API_KEY
+    // Llama 3.3 70B is a strong, tool-calling-capable Groq model. Override with
+    // GROQ_MODEL (without the "groq/" prefix — the route adds it).
+    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+    if (!apiKey) {
+      return {
+        error:
+          'Groq is not configured. Missing: GROQ_API_KEY. ' +
+          'Set it in .env.local (get a free key at https://console.groq.com/keys).',
+      }
+    }
+    return {
+      llm: {
+        usage_id: 'agent',
+        // The "groq/" prefix routes LiteLLM to Groq's OpenAI-compatible API.
+        model: `groq/${model}`,
+        api_key: apiKey,
+      },
+    }
+  }
+
+  if (LLM_PROVIDER === 'azure') {
+    const endpoint = process.env.AZURE_OPENAI_ENDPOINT
+    const apiKey = process.env.AZURE_OPENAI_API_KEY
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION || '2024-12-01-preview'
+    const deployment = process.env.AZURE_OPENAI_DEPLOYMENT
+
+    const missing: string[] = []
+    if (!endpoint) missing.push('AZURE_OPENAI_ENDPOINT')
+    if (!apiKey) missing.push('AZURE_OPENAI_API_KEY')
+    if (!deployment) missing.push('AZURE_OPENAI_DEPLOYMENT')
+    if (missing.length > 0) {
+      return {
+        error:
+          `Azure OpenAI is not configured. Missing: ${missing.join(', ')}. ` +
+          `Set these in .env.local (or switch LLM_PROVIDER=gemini for testing).`,
+      }
+    }
+    return {
+      llm: {
+        usage_id: 'agent',
+        model: `azure/${deployment}`,
+        base_url: endpoint,
+        api_version: apiVersion,
+        api_key: apiKey,
+      },
+    }
+  }
+
+  if (LLM_PROVIDER === 'openai') {
+    const apiKey = process.env.OPENAI_API_KEY
+    const model = process.env.OPENAI_MODEL || 'gpt-4o'
+    const baseUrl = process.env.OPENAI_BASE_URL // optional (proxies / compatible endpoints)
+    if (!apiKey) {
+      return {
+        error:
+          'OpenAI is not configured. Missing: OPENAI_API_KEY. ' +
+          'Set it in .env.local (or switch LLM_PROVIDER=gemini for testing).',
+      }
+    }
+    return {
+      llm: {
+        usage_id: 'agent',
+        // LiteLLM treats an unprefixed known model name as OpenAI.
+        model,
+        api_key: apiKey,
+        ...(baseUrl ? { base_url: baseUrl } : {}),
+      },
+    }
+  }
+
+  // Default: Google Gemini (testing).
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+  if (!apiKey) {
+    return {
+      error:
+        'Gemini is not configured. Missing: GEMINI_API_KEY. ' +
+        'Copy .env.example to .env.local and set GEMINI_API_KEY.',
+    }
+  }
+  return {
+    llm: {
+      usage_id: 'agent',
+      model: `gemini/${model}`,
+      api_key: apiKey,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HR persona + guardrails
+// ---------------------------------------------------------------------------
+// Appended to the backend's built-in system prompt via agent_context so we keep
+// the framework's tool-use/security scaffolding and layer the HR identity,
+// scope limits, grounding rules, and human-in-the-loop policy on top.
+const HR_SYSTEM_SUFFIX = `You are the AI HR Copilot, an assistant built exclusively for Human Resources professionals at this company. Your job is to help HR staff handle leave/PTO questions, benefits, onboarding, employee ticket triage, policy Q&A, and drafting HR communications.
+
+SCOPE — stay in your lane:
+- Only help with HR-related work. This includes employee data lookups, company policies/benefits, PTO/leave, onboarding/offboarding, ticket triage, and drafting HR messages.
+- If asked to do something outside HR (write code, general trivia, unrelated personal advice, tasks for other departments), politely decline in one sentence and steer back to how you can help with HR. Do not attempt the off-topic task.
+
+GROUNDING — never fabricate:
+- Never invent employee data, PTO balances, salaries, org structure, dates, or policy specifics. State facts only from tool results or provided documents.
+- If you don't have the data, say so plainly and offer to look it up with the available tools.
+- When answering from policy documents, cite the source (document/section) you relied on.
+
+HUMAN-IN-THE-LOOP — you draft, a human approves:
+- You may freely READ data to answer questions.
+- For any action that SENDS or CHANGES something (emails, Slack/Teams messages, ticket updates, approvals/rejections, record changes), prepare a complete draft for review and explicitly wait for the HR professional to approve before it is sent. Never auto-send or take irreversible actions on your own.
+
+CONFIDENTIALITY:
+- Treat all employee information as sensitive PII. Share only what is necessary to answer the question at hand and only with the HR user you are assisting.
+
+TONE:
+- Professional, concise, and empathetic. Prefer short, skimmable answers and clearly labeled drafts.`
+
+// Response tuning. Low temperature favors accuracy/consistency for HR facts.
+// Overridable via env without code changes.
+const LLM_TEMPERATURE = Number(process.env.HR_LLM_TEMPERATURE ?? '0.2')
+const LLM_MAX_OUTPUT_TOKENS = Number(process.env.HR_LLM_MAX_OUTPUT_TOKENS ?? '2048')
+
+// Token streaming. When true the backend wires the LLM stream callback and
+// publishes StreamingDeltaEvents over the WebSocket, so the UI renders the
+// answer token-by-token. The durable MessageEvent still arrives at the end
+// (deltas are a transient UX affordance), so this is safe to leave on. Set
+// HR_LLM_STREAM=false to fall back to whole-message delivery.
+const LLM_STREAM = (process.env.HR_LLM_STREAM ?? 'true').toLowerCase() !== 'false'
+
+// Health check (GET without query) and final-response fetch (GET ?final=1).
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+  const conversationId = searchParams.get('conversationId')
+  const wantsFinal = searchParams.get('final')
+
+  if (conversationId && wantsFinal) {
+    try {
+      const res = await fetch(
+        `${HRAGENT_API_URL}/api/conversations/${conversationId}/agent_final_response`,
+        { headers: backendHeaders() },
+      )
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        return NextResponse.json(
+          { error: body?.detail || 'Failed to fetch final response' },
+          { status: res.status || 502 },
+        )
+      }
+      return NextResponse.json({ response: body?.response ?? '' })
+    } catch (error) {
       return NextResponse.json(
-        { connected: false, status: 'error', detail: healthBody || 'Agent health check failed' },
-        { status: 503 }
+        { error: error instanceof Error ? error.message : 'Failed to fetch final response' },
+        { status: 502 },
       )
     }
+  }
 
-    return NextResponse.json({
-      connected: true,
-      status: 'ok',
-      agent: 'openhands',
-      raw: healthBody
-    })
+  try {
+    const res = await fetch(`${HRAGENT_API_URL}/health`, { headers: backendHeaders() })
+    if (!res.ok) {
+      return NextResponse.json(
+        { connected: false, detail: 'Agent health check failed' },
+        { status: 503 },
+      )
+    }
+    return NextResponse.json({ connected: true })
   } catch (error) {
     return NextResponse.json(
-      {
-        connected: false,
-        status: 'error',
-        detail: error instanceof Error ? error.message : 'Agent health check failed'
-      },
-      { status: 503 }
+      { connected: false, detail: error instanceof Error ? error.message : 'Health check failed' },
+      { status: 503 },
     )
   }
 }
 
-export async function POST(request: NextRequest) {
+// Create a new backend conversation configured to use the selected LLM provider.
+export async function POST() {
+  const { llm, error } = buildLlmConfig()
+  if (!llm) {
+    return NextResponse.json({ error }, { status: 400 })
+  }
+
+  // Apply HR response tuning to whichever provider is active. LiteLLM maps
+  // these per-provider; reasoning-only models strip temperature automatically.
+  const tunedLlm: LlmConfig = {
+    ...llm,
+    temperature: LLM_TEMPERATURE,
+    max_output_tokens: LLM_MAX_OUTPUT_TOKENS,
+    stream: LLM_STREAM,
+  }
+
+  // The model prefix (gemini/… , azure/… , or bare OpenAI name) routes the
+  // backend's LiteLLM layer to the matching provider client.
+  //
+  // NOTE: This HRAgents build ships the exec-tool *implementations* stripped out
+  // ("removed during the cleanup"). We send no exec tools yet; enterprise data
+  // and comms arrive as MCP tools in Phase 2. The agent keeps its built-in
+  // finish/think tools and runs as a conversational HR assistant for now.
+  //
+  // Guardrails:
+  // - agent_context.system_message_suffix installs the HR persona + scope +
+  //   grounding + human-in-the-loop rules on top of the built-in prompt. This is
+  //   the active enforcement for "stay in lane" and "draft, don't auto-send".
+  // - No global confirmation_policy: ConfirmRisky confirms EVERY tool call here
+  //   because, with no security_analyzer registered in this build, every action
+  //   is UNKNOWN risk (confirm_unknown=true). That would force approval even on
+  //   read-only lookups. So reads flow freely, and selective "Approve & Send"
+  //   HITL for write/comms actions is implemented in Phase 4b via client_tools
+  //   (those surface to the browser and execute only after canvas approval).
+  const startConversationRequest = {
+    workspace: { working_dir: WORKSPACE_DIR },
+    agent: {
+      kind: 'Agent',
+      llm: tunedLlm,
+      tools: [],
+      // Read-only HR data tools (employee_lookup, pto_balance, org_chart,
+      // benefits_lookup, policy_search). Mock-backed now; swappable to Azure.
+      mcp_config: buildMcpConfig(),
+      agent_context: {
+        system_message_suffix: HR_SYSTEM_SUFFIX,
+      },
+    },
+    max_iterations: 100,
+  }
+
   try {
-    const body = await request.json()
-    const { prompt } = body
-
-    if (!prompt || typeof prompt !== 'string') {
-      return NextResponse.json(
-        { error: 'Prompt is required and must be a string' },
-        { status: 400 }
-      )
-    }
-
-    console.log('Forwarding prompt to OpenHands agent service:', prompt)
-
-    const agentResponse = await fetch(OPENHANDS_AGENT_URL, {
+    const res = await fetch(`${HRAGENT_API_URL}/api/conversations`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ prompt })
+      headers: backendHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(startConversationRequest),
     })
 
-    const responseText = await agentResponse.text()
-    let data: AgentServiceResponse | null = null
-
-    try {
-      data = responseText ? JSON.parse(responseText) : null
-    } catch {
-      data = null
-    }
-
-    if (!agentResponse.ok) {
-      const detail = data?.detail || data?.message || 'OpenHands agent service returned an error'
-      console.error('OpenHands agent service error:', detail)
+    const body = await res.json().catch(() => null)
+    if (!res.ok) {
+      const detail =
+        (body && (body.detail || body.exception || body.error)) ||
+        'Failed to create conversation on the HR Agent backend'
+      console.error('HR Agent create-conversation error:', detail)
       return NextResponse.json(
-        { error: detail, status: 'error' },
-        { status: agentResponse.status || 502 }
+        { error: typeof detail === 'string' ? detail : JSON.stringify(detail) },
+        { status: res.status || 502 },
       )
     }
 
-    return NextResponse.json({
-      message: data?.message || 'OpenHands conversation completed successfully.',
-      metadata: data?.metadata || {
-        files: [],
-        artifacts: [],
-        tool_calls: []
-      },
-      status: data?.status || 'success',
-      agent_id: 'openhands-agent',
-      session_id: `session-${Date.now()}`,
-      workspace: data?.workspace || process.cwd()
-    })
+    if (!body?.id) {
+      return NextResponse.json(
+        { error: 'HR Agent backend did not return a conversation id' },
+        { status: 502 },
+      )
+    }
+
+    return NextResponse.json({ conversationId: body.id })
   } catch (error) {
     console.error('Chat API error:', error)
     return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : 'Internal server error',
-        status: 'error'
-      },
-      { status: 500 }
+      { error: error instanceof Error ? error.message : 'Internal server error' },
+      { status: 500 },
     )
   }
 }
 
-export async function DELETE() {
-  return NextResponse.json(
-    { message: 'OpenHands agent service endpoint is stateless for this request' },
-    { status: 200 }
-  )
+// Interrupt a running conversation.
+export async function DELETE(request: NextRequest) {
+  let conversationId: string | undefined
+  try {
+    const body = await request.json()
+    conversationId = body?.conversationId
+  } catch {
+    /* no body */
+  }
+  if (!conversationId) {
+    return NextResponse.json({ error: 'conversationId is required' }, { status: 400 })
+  }
+  try {
+    await fetch(`${HRAGENT_API_URL}/api/conversations/${conversationId}/interrupt`, {
+      method: 'POST',
+      headers: backendHeaders(),
+    })
+  } catch {
+    /* best effort */
+  }
+  return NextResponse.json({ success: true })
 }
