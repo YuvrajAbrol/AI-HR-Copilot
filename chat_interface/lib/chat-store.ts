@@ -8,6 +8,7 @@ import type { EventCategory, EventStatus } from './agent-runtime'
 // Leaf store (does not import back into chat-store), so importing the value is
 // cycle-safe. Tool observations feed the right-hand Side Canvas.
 import { useCanvas, type CanvasModule } from './canvas-store'
+import { HR_ACTION_TOOL_NAMES, actionTitle, actionStepTitle } from './hr-actions'
 
 export type Reaction = 'up' | 'down' | null
 
@@ -172,16 +173,27 @@ function truncate(text: string, max = 140): string {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t
 }
 
-// Compact "key: value, key: value" summary of a tool call's arguments for the
-// step's detail line. Drops the internal discriminator ("kind") and unwraps the
-// MCP action envelope, whose real args live under `data`.
-function argsSummary(action: any): string | undefined {
-  if (!action || typeof action !== 'object') return undefined
-  const inner =
+// Extract a tool call's real arguments from the ActionEvent `action` payload.
+// MCP tools nest args under `data`; client tools carry them top-level. Either
+// way, drop the SDK meta fields (kind / summary / security_risk).
+function extractActionParams(action: any): Record<string, any> {
+  if (!action || typeof action !== 'object') return {}
+  const base =
     action.data && typeof action.data === 'object' && !Array.isArray(action.data)
       ? action.data
       : action
-  const entries = Object.entries(inner).filter(([k]) => k !== 'kind')
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(base)) {
+    if (k === 'kind' || k === 'summary' || k === 'security_risk') continue
+    out[k] = v
+  }
+  return out
+}
+
+// Compact "key: value, key: value" summary of a tool call's arguments for the
+// step's detail line.
+function argsSummary(action: any): string | undefined {
+  const entries = Object.entries(extractActionParams(action))
   if (entries.length === 0) return undefined
   const parts = entries.map(
     ([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`,
@@ -716,6 +728,28 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
     // The final answer is delivered via MessageEvent; don't clutter the feed
     // with the internal "finish" call.
     if (toolName === 'finish') return
+
+    // Human-in-the-loop action tool: the backend acks without sending, so we
+    // surface an "Approve & Send" card on the Side Canvas for the HR user.
+    if (HR_ACTION_TOOL_NAMES.has(toolName)) {
+      const params = extractActionParams(evt.action)
+      pushActivity(set, {
+        id: newId('act'),
+        category: 'tool',
+        title: actionStepTitle(toolName, params),
+        detail: argsSummary(evt.action),
+        status: 'running',
+        createdAtMs: Date.now(),
+        toolCallId: evt.tool_call_id,
+      })
+      useCanvas.getState().openApproval({
+        toolName,
+        title: actionTitle(toolName, params),
+        params,
+      })
+      return
+    }
+
     pushActivity(set, {
       id: newId('act'),
       category: categoryForTool(toolName),

@@ -4,14 +4,21 @@ import {
   Briefcase,
   Building2,
   CalendarDays,
+  CheckCircle2,
   FileText,
   Mail,
   MapPin,
+  MessageSquare,
+  Send,
   Shield,
   User,
   Users,
+  X,
+  XCircle,
 } from "lucide-react"
-import type { CanvasArtifact } from "@/lib/canvas-store"
+import { toast } from "sonner"
+import { useCanvas, type CanvasArtifact } from "@/lib/canvas-store"
+import { HR_ACTION_KIND, type HrActionKind } from "@/lib/hr-actions"
 import { cn } from "@/lib/utils"
 
 // ---------------------------------------------------------------------------
@@ -297,6 +304,123 @@ function Policy({ data }: { data: any }) {
   )
 }
 
+const ACTION_ICON: Record<HrActionKind, React.ComponentType<{ className?: string }>> = {
+  email: Mail,
+  slack: MessageSquare,
+  teams: MessageSquare,
+}
+
+function ActionApproval({ artifact }: { artifact: CanvasArtifact }) {
+  const resolveApproval = useCanvas((s) => s.resolveApproval)
+  const action = artifact.action
+  if (!action) return null
+
+  const kind = HR_ACTION_KIND[action.toolName] ?? "email"
+  const Icon = ACTION_ICON[kind]
+  const p = action.params ?? {}
+  const pending = action.status === "pending"
+
+  // Recipient/subject rows differ per channel; the body is common.
+  const rows: Array<{ label: string; value?: string }> =
+    kind === "email"
+      ? [
+          { label: "To", value: p.to },
+          { label: "Cc", value: p.cc },
+          { label: "Subject", value: p.subject },
+        ]
+      : kind === "slack"
+        ? [{ label: "Channel", value: p.channel }]
+        : [{ label: "Recipient", value: p.recipient }]
+
+  const body: string = kind === "email" ? p.body : p.message
+
+  const approve = () => {
+    resolveApproval(artifact.id, "approved")
+    toast.success("Approved & sent", { description: artifact.title })
+  }
+  const reject = () => {
+    resolveApproval(artifact.id, "rejected")
+    toast("Discarded", { description: "Nothing was sent." })
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Panel className="border-white/12 bg-white/[0.04]">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06]">
+            <Icon className="h-4 w-4 text-neutral-200" />
+          </span>
+          <div className="min-w-0">
+            <p className="truncate text-[14px] font-semibold text-neutral-50">{artifact.title}</p>
+            <p className="text-[11.5px] text-neutral-400">Awaiting your approval before sending</p>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel>
+        <div className="flex flex-col gap-3">
+          {rows.map(
+            (r) =>
+              r.value && (
+                <div key={r.label} className="flex flex-col gap-0.5">
+                  <span className="text-[10.5px] font-medium uppercase tracking-wide text-neutral-500">
+                    {r.label}
+                  </span>
+                  <span className="text-[13px] text-neutral-100">{r.value}</span>
+                </div>
+              ),
+          )}
+          {body && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10.5px] font-medium uppercase tracking-wide text-neutral-500">
+                Message
+              </span>
+              <div className="whitespace-pre-wrap rounded-lg border border-white/[0.06] bg-black/30 p-3 text-[13px] leading-relaxed text-neutral-200">
+                {body}
+              </div>
+            </div>
+          )}
+        </div>
+      </Panel>
+
+      {pending ? (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={approve}
+            className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-white/15 bg-white/[0.1] px-3 py-2.5 text-[13px] font-semibold text-neutral-50 transition-colors hover:bg-white/[0.16]"
+          >
+            <Send className="h-4 w-4" />
+            Approve &amp; Send
+          </button>
+          <button
+            onClick={reject}
+            className="flex items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5 text-[13px] font-medium text-neutral-300 transition-colors hover:bg-white/[0.06]"
+          >
+            <X className="h-4 w-4" />
+            Reject
+          </button>
+        </div>
+      ) : (
+        <div
+          className={cn(
+            "flex items-center gap-2 rounded-lg border px-3 py-2.5 text-[12.5px]",
+            action.status === "approved"
+              ? "border-white/15 bg-white/[0.06] text-neutral-100"
+              : "border-white/10 bg-white/[0.02] text-neutral-400",
+          )}
+        >
+          {action.status === "approved" ? (
+            <CheckCircle2 className="h-4 w-4 shrink-0" />
+          ) : (
+            <XCircle className="h-4 w-4 shrink-0" />
+          )}
+          <span>{action.result}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function JsonFallback({ data }: { data: any }) {
   return (
     <Panel className="p-3">
@@ -322,6 +446,8 @@ export function CanvasModuleRenderer({ artifact }: { artifact: CanvasArtifact })
       return <Benefits data={artifact.data} />
     case "policy":
       return <Policy data={artifact.data} />
+    case "action_approval":
+      return <ActionApproval artifact={artifact} />
     default:
       return <JsonFallback data={artifact.data} />
   }
@@ -333,5 +459,6 @@ export const MODULE_LABEL: Record<CanvasArtifact["module"], string> = {
   org_chart: "Org chart",
   benefits: "Benefits",
   policy: "Policy",
+  action_approval: "Action",
   json: "Data",
 }

@@ -85,8 +85,9 @@ export function SideCanvas() {
           )}
         </div>
 
-        {/* Footer: read-only notice (write/approve actions land in Phase 4b) */}
-        {active && (
+        {/* Footer: read-only notice for data modules. Approval cards carry
+            their own actions, so no footer there. */}
+        {active && active.module !== "action_approval" && (
           <div className="shrink-0 border-t border-white/[0.06] px-4 py-2.5">
             <p className="text-[11px] text-neutral-500">
               Read-only view from <span className="text-neutral-400">{active.toolName}</span>.

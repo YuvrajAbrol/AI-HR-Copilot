@@ -10,10 +10,24 @@ export type CanvasModule =
   | 'org_chart'
   | 'benefits'
   | 'policy'
+  | 'action_approval'
   | 'json'
 
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected'
+
+// Human-in-the-loop action awaiting the HR user's decision. Attached to an
+// 'action_approval' artifact.
+export interface CanvasAction {
+  toolName: string
+  params: Record<string, any>
+  status: ApprovalStatus
+  resolvedAt?: number
+  result?: string
+}
+
 // A single result surfaced to the right-hand Side Canvas for review. Built from
-// a tool ObservationEvent; `data` is the parsed tool payload.
+// a tool ObservationEvent; `data` is the parsed tool payload. For approval
+// cards, `action` carries the pending decision.
 export interface CanvasArtifact {
   id: string
   module: CanvasModule
@@ -21,6 +35,7 @@ export interface CanvasArtifact {
   title: string
   data: any
   createdAt: number
+  action?: CanvasAction
 }
 
 interface CanvasState {
@@ -34,6 +49,12 @@ interface CanvasState {
     title: string
     data: any
   }) => void
+  openApproval: (a: {
+    toolName: string
+    title: string
+    params: Record<string, any>
+  }) => void
+  resolveApproval: (id: string, decision: Exclude<ApprovalStatus, 'pending'>) => void
   setOpen: (open: boolean) => void
   toggle: () => void
   select: (id: string) => void
@@ -66,6 +87,41 @@ export const useCanvas = create<CanvasState>((set) => ({
       const artifacts = [artifact, ...state.artifacts].slice(0, MAX_ARTIFACTS)
       return { artifacts, activeId: artifact.id, open: true }
     }),
+
+  openApproval: ({ toolName, title, params }) =>
+    set((state) => {
+      const artifact: CanvasArtifact = {
+        id: newId(),
+        module: 'action_approval',
+        toolName,
+        title,
+        data: params,
+        createdAt: Date.now(),
+        action: { toolName, params, status: 'pending' },
+      }
+      const artifacts = [artifact, ...state.artifacts].slice(0, MAX_ARTIFACTS)
+      return { artifacts, activeId: artifact.id, open: true }
+    }),
+
+  resolveApproval: (id, decision) =>
+    set((state) => ({
+      artifacts: state.artifacts.map((a) =>
+        a.id === id && a.action && a.action.status === 'pending'
+          ? {
+              ...a,
+              action: {
+                ...a.action,
+                status: decision,
+                resolvedAt: Date.now(),
+                result:
+                  decision === 'approved'
+                    ? 'Sent (simulated — live delivery arrives with the comms integration).'
+                    : 'Discarded. Nothing was sent.',
+              },
+            }
+          : a,
+      ),
+    })),
 
   setOpen: (open) => set({ open }),
   toggle: () => set((state) => ({ open: !state.open })),

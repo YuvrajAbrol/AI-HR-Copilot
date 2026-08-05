@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import path from 'node:path'
 import fs from 'node:fs'
+import { HR_ACTION_TOOLS } from '@/lib/hr-actions'
 
 // Server-side base URL for the HRAgents agent server. Secrets (the LLM API
 // key) only ever live in this Next.js server process — they are never sent to
@@ -187,7 +188,9 @@ GROUNDING — never fabricate:
 
 HUMAN-IN-THE-LOOP — you draft, a human approves:
 - You may freely READ data to answer questions.
-- For any action that SENDS or CHANGES something (emails, Slack/Teams messages, ticket updates, approvals/rejections, record changes), prepare a complete draft for review and explicitly wait for the HR professional to approve before it is sent. Never auto-send or take irreversible actions on your own.
+- To SEND a communication, call the matching action tool with a complete, ready-to-send draft: use "send_email" for email, "send_slack_message" for Slack, and "send_teams_message" for Microsoft Teams. These tools do NOT send immediately — the draft is placed on the HR user's Side Canvas and is only delivered after they click "Approve & Send".
+- After calling a send tool, tell the user you have PREPARED the message and placed it on the canvas for their review and approval. Never claim it has already been sent, and never take irreversible actions on your own.
+- For other changes (ticket updates, record changes) where no tool exists yet, present the proposed change and ask the user to confirm; do not fabricate a completed action.
 
 CONFIDENTIALITY:
 - Treat all employee information as sensitive PII. Share only what is necessary to answer the question at hand and only with the HR user you are assisting.
@@ -299,6 +302,13 @@ export async function POST() {
         system_message_suffix: HR_SYSTEM_SUFFIX,
       },
     },
+    // Human-in-the-loop action tools (send_email / send_slack_message /
+    // send_teams_message). The backend registers these and, when the agent
+    // calls one, emits an ActionEvent + immediately acks WITHOUT performing the
+    // action. The frontend renders an "Approve & Send" card on the Side Canvas;
+    // the human is the enforcement point. No secrets here — actual delivery is
+    // wired in Phase 2b behind the same approval gate.
+    client_tools: HR_ACTION_TOOLS,
     max_iterations: 100,
   }
 
