@@ -35,17 +35,15 @@ Run these once. If you've already used the app, skip to **Daily boot-up**.
    npm install
    ```
 
-3. **Frontend environment file** — `chat_interface\.env.local` already exists and
-   is configured for **Groq** (free). Confirm it contains a working key:
+3. **Frontend environment file** — `chat_interface\.env.local` is configured for **TokenRouter**:
 
    ```
-   LLM_PROVIDER=groq
-   GROQ_API_KEY=gsk_...
-   GROQ_MODEL=llama-3.3-70b-versatile
+   LLM_PROVIDER=tokenrouter
+   TOKENROUTER_API_KEY=sk-v8NoCrajDilDlx1k53N2q8Iwevt3Jv0FLzL6xllGd0Xvi3jV
+   TOKENROUTER_BASE_URL=https://api.tokenrouter.com/v1
+   TOKENROUTER_MODEL=moonshotai/kimi-k3-free
    ```
 
-   Get a free key at <https://console.groq.com/keys> if the current one stops
-   working. (To switch to OpenAI/Azure later, see **Switching LLM provider**.)
 
 ---
 
@@ -132,14 +130,13 @@ node scripts/hr-test.mjs "What is Sarah Chen's PTO balance?"
 
 You should see `ACTION → pto_balance`, `OBSERVATION ←`, and a grounded `FINAL:` answer.
 
----
-
-## Switching LLM provider (Groq → OpenAI / Azure)
+## Switching LLM provider (TokenRouter → Groq / OpenAI / Azure)
 
 No code changes — edit `chat_interface\.env.local`, then restart the frontend:
 
+- **TokenRouter:** `LLM_PROVIDER=tokenrouter`, set `TOKENROUTER_API_KEY`, `TOKENROUTER_BASE_URL` (default `https://api.tokenrouter.com/v1`), `TOKENROUTER_MODEL` (default `moonshotai/kimi-k3-free`).
+- **Groq:** `LLM_PROVIDER=groq`, set `GROQ_API_KEY=gsk-...` (model `GROQ_MODEL`, default `llama-3.3-70b-versatile`).
 - **OpenAI:** `LLM_PROVIDER=openai`, set `OPENAI_API_KEY=sk-...` (model `OPENAI_MODEL`, default `gpt-4o`).
 - **Azure OpenAI:** `LLM_PROVIDER=azure`, set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
   `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`.
 
-See `chat_interface\.env.example` for the full annotated list.

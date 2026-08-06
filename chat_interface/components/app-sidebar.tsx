@@ -4,11 +4,12 @@ import { useState } from "react"
 import {
   MessageSquarePlus,
   Search,
-  Home,
-  FolderKanban,
   MessageSquare,
-  Component,
-  FileText,
+  Plug,
+  Blocks,
+  Store,
+  Brain,
+  SlidersHorizontal,
   ChevronRight,
   ChevronDown,
   ChevronsUpDown,
@@ -32,13 +33,15 @@ import {
 import { User, Settings, CreditCard, LogOut } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useChat } from "@/lib/chat-store"
+import { useNavigation, type View } from "@/lib/navigation"
 
-const PRIMARY_NAV = [
-  { icon: Home, label: "Home" },
-  { icon: FolderKanban, label: "Projects" },
-  { icon: MessageSquare, label: "Chats" },
-  { icon: Component, label: "Design Systems" },
-  { icon: FileText, label: "Templates" },
+const PRIMARY_NAV: { icon: typeof MessageSquare; label: string; view: View }[] = [
+  { icon: MessageSquare, label: "Chat", view: "chat" },
+  { icon: Plug, label: "MCP Connections", view: "mcp" },
+  { icon: Blocks, label: "Skills", view: "skills" },
+  { icon: Store, label: "Marketplace", view: "marketplace" },
+  { icon: Brain, label: "Memory", view: "memory" },
+  { icon: SlidersHorizontal, label: "Settings", view: "settings" },
 ]
 
 interface AppSidebarProps {
@@ -49,12 +52,21 @@ interface AppSidebarProps {
 
 export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
   const { conversations, activeId, newChat, selectConversation, deleteConversation } = useChat()
-  const [activeNav, setActiveNav] = useState("Chats")
+  const { view, setView } = useNavigation()
   const [query, setQuery] = useState("")
   const [searchOpen, setSearchOpen] = useState(false)
   const [favoritesOpen, setFavoritesOpen] = useState(false)
   const [recentOpen, setRecentOpen] = useState(true)
   const [showAllRecent, setShowAllRecent] = useState(false)
+
+  const goNewChat = () => {
+    setView("chat")
+    newChat()
+  }
+  const goSelect = (id: string) => {
+    setView("chat")
+    selectConversation(id)
+  }
 
   const filtered = conversations.filter((c) => c.title.toLowerCase().includes(query.toLowerCase()))
   const visibleRecent = showAllRecent ? filtered : filtered.slice(0, 5)
@@ -95,7 +107,7 @@ export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
         <div className="flex items-stretch gap-1">
           <Button
             variant="secondary"
-            onClick={newChat}
+            onClick={goNewChat}
             className="btn-3d btn-glow flex-1 justify-center gap-2 rounded-md border border-white/20 bg-gradient-to-br from-primary via-gray-900 to-black font-medium text-white shadow-xl transition-all hover:from-gray-900 hover:to-black"
           >
             <MessageSquarePlus className="h-4 w-4" />
@@ -122,21 +134,21 @@ export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
               </DropdownMenuLabel>
               <DropdownMenuSeparator className="bg-white/10" />
               <DropdownMenuItem
-                onClick={newChat}
+                onClick={goNewChat}
                 className="gap-2.5 text-[13px] transition-colors focus:bg-white/[0.06] focus:text-white"
               >
                 <MessageSquarePlus className="h-4 w-4 text-neutral-400" />
                 New Chat
               </DropdownMenuItem>
               <DropdownMenuItem
-                onClick={newChat}
+                onClick={goNewChat}
                 className="gap-2.5 text-[13px] transition-colors focus:bg-white/[0.06] focus:text-white"
               >
                 <FolderPlus className="h-4 w-4 text-neutral-400" />
                 New Project
               </DropdownMenuItem>
               <DropdownMenuItem
-                onClick={newChat}
+                onClick={goNewChat}
                 className="gap-2.5 text-[13px] transition-colors focus:bg-white/[0.06] focus:text-white"
               >
                 <LayoutTemplate className="h-4 w-4 text-neutral-400" />
@@ -180,19 +192,19 @@ export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
             </div>
           </div>
 
-          {PRIMARY_NAV.map(({ icon: Icon, label }) => (
+          {PRIMARY_NAV.map(({ icon: Icon, label, view: navView }) => (
             <button
               key={label}
-              onClick={() => setActiveNav(label)}
+              onClick={() => setView(navView)}
               className={cn(
                 "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors duration-200 hover:bg-sidebar-accent",
-                activeNav === label && "bg-sidebar-accent",
+                view === navView && "bg-sidebar-accent",
               )}
             >
               <Icon
                 className={cn(
                   "h-[18px] w-[18px] text-muted-foreground transition-colors duration-300 group-hover:text-sidebar-foreground",
-                  activeNav === label && "text-sidebar-foreground",
+                  view === navView && "text-sidebar-foreground",
                 )}
               />
               {label}
@@ -260,7 +272,7 @@ export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
                     )}
                   >
                     <button
-                      onClick={() => selectConversation(c.id)}
+                      onClick={() => goSelect(c.id)}
                       className="flex min-w-0 flex-1 items-center gap-3 text-left"
                     >
                       <CircleDashed
@@ -315,28 +327,28 @@ export function AppSidebar({ open, width, onCollapse }: AppSidebarProps) {
           <DropdownMenuContent
             align="start"
             side="top"
-            className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[240px] border-white/10 bg-[#111111] text-neutral-200 duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+            className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[240px]"
           >
             <DropdownMenuLabel className="flex flex-col">
-              <span className="text-[13px] font-medium text-neutral-100">Employee</span>
-              <span className="text-xs font-normal text-neutral-500">Personal workspace</span>
+              <span className="text-[13px] font-medium text-foreground">Employee</span>
+              <span className="text-xs font-normal text-muted-foreground">Personal workspace</span>
             </DropdownMenuLabel>
-            <DropdownMenuSeparator className="bg-white/10" />
-            <DropdownMenuItem className="gap-2 text-[13px] focus:bg-white/[0.06] focus:text-white">
-              <User className="h-4 w-4 text-neutral-400" />
+            <DropdownMenuSeparator />
+            <DropdownMenuItem className="gap-2 text-[13px]">
+              <User />
               Profile
             </DropdownMenuItem>
-            <DropdownMenuItem className="gap-2 text-[13px] focus:bg-white/[0.06] focus:text-white">
-              <Settings className="h-4 w-4 text-neutral-400" />
+            <DropdownMenuItem onClick={() => setView("settings")} className="gap-2 text-[13px]">
+              <Settings />
               Settings
             </DropdownMenuItem>
-            <DropdownMenuItem className="gap-2 text-[13px] focus:bg-white/[0.06] focus:text-white">
-              <CreditCard className="h-4 w-4 text-neutral-400" />
+            <DropdownMenuItem className="gap-2 text-[13px]">
+              <CreditCard />
               Billing
             </DropdownMenuItem>
-            <DropdownMenuSeparator className="bg-white/10" />
-            <DropdownMenuItem className="gap-2 text-[13px] text-neutral-400 focus:bg-white/[0.06] focus:text-neutral-100">
-              <LogOut className="h-4 w-4" />
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" className="gap-2 text-[13px]">
+              <LogOut />
               Log out
             </DropdownMenuItem>
           </DropdownMenuContent>

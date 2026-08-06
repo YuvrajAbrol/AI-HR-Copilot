@@ -63,22 +63,46 @@ function buildMcpConfig(): Record<string, unknown> {
   }
 }
 
-// Active LLM provider. Testing default is "ollama" (fully local, unlimited,
-// zero-cost, no auth). Alt testing: "groq"/"gemini". Flip to "openai" or "azure"
-// for the final build by setting LLM_PROVIDER and pasting the key into
-// .env.local — no code change required.
-const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'ollama').toLowerCase()
+// Active LLM provider. Default is "tokenrouter" (OpenAI-compatible router).
+// Supported choices: "tokenrouter", "groq", "ollama", "openai", "azure", "gemini"
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || 'tokenrouter').toLowerCase()
 
 // The `llm` block sent to the backend. The model *prefix* selects the provider
 // client inside the backend's LiteLLM layer:
+//   - "openai/<model>"      → TokenRouter / OpenAI-compatible endpoint with base_url
+//   - "groq/<model>"        → Groq (testing; free tier, OpenAI-compatible)
 //   - "ollama_chat/<model>" → local Ollama (testing; unlimited, no key, tools)
-//   - "groq/<model>"        → Groq (alt testing; free tier, OpenAI-compatible)
 //   - "gemini/<model>"      → Google Gemini (alt testing)
 //   - "<model>"             → OpenAI (final; e.g. gpt-4o)
 //   - "azure/<deployment>"  → Azure OpenAI (final; enterprise)
 type LlmConfig = Record<string, unknown>
 
 function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
+  if (LLM_PROVIDER === 'tokenrouter') {
+    const apiKey =
+      process.env.TOKENROUTER_API_KEY ||
+      'sk-v8NoCrajDilDlx1k53N2q8Iwevt3Jv0FLzL6xllGd0Xvi3jV'
+    const baseUrl =
+      process.env.TOKENROUTER_BASE_URL || 'https://api.tokenrouter.com/v1'
+    const model = process.env.TOKENROUTER_MODEL || 'moonshotai/kimi-k3-free'
+
+    if (!apiKey) {
+      return {
+        error:
+          'TokenRouter is not configured. Missing: TOKENROUTER_API_KEY. ' +
+          'Set it in .env.local.',
+      }
+    }
+    return {
+      llm: {
+        usage_id: 'agent',
+        model: model.startsWith('openai/') ? model : `openai/${model}`,
+        base_url: baseUrl,
+        api_key: apiKey,
+      },
+    }
+  }
+
   if (LLM_PROVIDER === 'ollama') {
     // Local Ollama via LiteLLM. We use the "ollama_chat/" prefix (Ollama's
     // /api/chat endpoint) rather than legacy "ollama/" (/api/generate): only

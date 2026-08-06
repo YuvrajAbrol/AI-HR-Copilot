@@ -5,6 +5,12 @@ const APP = process.env.APP_URL || 'http://localhost:3000'
 const WS_BASE = process.env.NEXT_PUBLIC_HRAGENT_WS_URL || 'ws://127.0.0.1:8001'
 const PROMPT = process.argv[2] || 'hello there!'
 
+// Slow-model tolerance: the free-tier TokenRouter/Groq reasoning models can take
+// 2-3+ minutes per LLM call, so the default wait is generous and overridable via
+// HR_TEST_TIMEOUT_MS. The old 110s default silently "passed" only with fast
+// providers (local Ollama) and timed out mid-run with cloud reasoning models.
+const TIMEOUT_MS = Number(process.env.HR_TEST_TIMEOUT_MS || '600000')
+
 function log(...a) { console.log(new Date().toISOString().slice(11, 19), ...a) }
 
 const res = await fetch(`${APP}/api/chat`, {
@@ -64,4 +70,4 @@ ws.addEventListener('message', (e) => {
   }
 })
 ws.addEventListener('error', () => { log('ws error'); finish(1) })
-setTimeout(() => { log('TIMEOUT; kinds:', JSON.stringify(kinds)); finish(1) }, 110000)
+setTimeout(() => { log('TIMEOUT; kinds:', JSON.stringify(kinds)); finish(1) }, TIMEOUT_MS)
