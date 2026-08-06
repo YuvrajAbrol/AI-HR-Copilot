@@ -29,6 +29,9 @@ export interface ActivityStep {
   /** Backend tool_call_id, used to match an Observation back to its Action. */
   toolCallId?: string
   level?: 'info' | 'warn' | 'error' | 'debug'
+  /** Raw action data for rendering approval cards if the backend pauses execution. */
+  toolName?: string
+  rawParams?: Record<string, any>
 }
 
 export interface Message {
@@ -165,12 +168,14 @@ const TOOL_LABELS: Record<string, string> = {
   org_chart: 'Fetching org chart',
   benefits_lookup: 'Looking up benefits',
   policy_search: 'Searching HR policies',
+  invoke_skill: 'Executing HR skill',
 }
 
 // Map a backend tool name to the execution panel's visual category so the
 // reasoning stepper shows a sensible icon (DB lookup vs. knowledge search).
 function categoryForTool(name: string): EventCategory {
   if (name === 'policy_search') return 'memory'
+  if (name === 'invoke_skill') return 'skill'
   if (DATA_TOOLS.has(name)) return 'database'
   if (name === 'think') return 'step'
   return 'tool'
@@ -838,27 +843,12 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
     // with the internal "finish" call.
     if (toolName === 'finish') return
 
-    // Human-in-the-loop action tool: the backend acks without sending, so we
-    // surface an "Approve & Send" card on the Side Canvas for the HR user.
-    if (HR_ACTION_TOOL_NAMES.has(toolName)) {
-      const params = extractActionParams(evt.action)
-      pushActivity(set, {
-        id: newId('act'),
-        category: 'tool',
-        title: actionStepTitle(toolName, params),
-        detail: argsSummary(evt.action),
-        status: 'running',
-        createdAtMs: Date.now(),
-        toolCallId: evt.tool_call_id,
-      })
-      useCanvas.getState().openApproval({
-        toolName,
-        title: actionTitle(toolName, params),
-        params,
-      })
-      return
-    }
+    const params = extractActionParams(evt.action)
 
+    // We no longer eagerly open Approval cards here for HR_ACTION_TOOL_NAMES, 
+    // because we want the backend's SecurityAnalyzer and ConfirmationPolicy to 
+    // dictate when an approval is required (i.e. via 'waiting_for_confirmation' status).
+    // So we just push it as a running step and wait for the backend's decision.
     pushActivity(set, {
       id: newId('act'),
       category: categoryForTool(toolName),
@@ -867,6 +857,8 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
       status: 'running',
       createdAtMs: Date.now(),
       toolCallId: evt.tool_call_id,
+      toolName,
+      rawParams: params,
     })
     return
   }
@@ -918,6 +910,20 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
     const status = readExecutionStatus(evt)
     if (status === 'running') {
       set({ isRunning: true })
+    } else if (status === 'waiting_for_confirmation') {
+      set({ isRunning: false })
+      const { activity } = get()
+      // The pending action should be the last step in a 'running' state
+      const pendingStep = activity.slice().reverse().find(s => s.status === 'running')
+      const conversationId = get().backendConversationId;
+      if (pendingStep && pendingStep.toolName && conversationId) {
+        useCanvas.getState().openApproval({
+          toolName: pendingStep.toolName,
+          title: actionTitle({ tool_name: pendingStep.toolName }), 
+          params: pendingStep.rawParams || {},
+          conversationId,
+        })
+      }
     } else if (status && TERMINAL_STATUSES.has(status)) {
       finishTurn(status, get, set)
     }

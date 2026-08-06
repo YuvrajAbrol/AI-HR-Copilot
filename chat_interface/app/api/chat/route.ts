@@ -185,7 +185,7 @@ function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
 
   // Default: Google Gemini (testing).
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+  const model = process.env.GEMINI_MODEL || 'gemini-flash-latest'
   if (!apiKey) {
     return {
       error:
@@ -198,6 +198,7 @@ function buildLlmConfig(): { llm?: LlmConfig; error?: string } {
       usage_id: 'agent',
       model: `gemini/${model}`,
       api_key: apiKey,
+      max_input_tokens: 1048576, // Gemini 1.5 Flash has a 1M token context window
     },
   }
 }
@@ -340,6 +341,12 @@ export async function POST() {
       agent_context: {
         system_message_suffix: HR_SYSTEM_SUFFIX,
       },
+    },
+    confirmation_policy: {
+      kind: 'ConfirmRisky'
+    },
+    security_analyzer: {
+      kind: 'LLMSecurityAnalyzer'
     },
     // Human-in-the-loop action tools (send_email / send_slack_message /
     // send_teams_message). The backend registers these and, when the agent

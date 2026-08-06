@@ -70,13 +70,18 @@ class HRAgentClient {
       try {
         // Determine WebSocket URL based on configuration
         // Use real HR Agent WebSocket endpoint from runtime.server.sockets.py
+        if (!this.conversationId) {
+          throw new Error('No conversation ID set. Call connectToConversation first.')
+        }
+
         let wsUrl: string
+        const path = `/sockets/events/${this.conversationId}?resend_mode=all`
         if (this.config.workspace?.host) {
           // Use HR Agent's events socket endpoint
-          wsUrl = `ws://${this.config.workspace.host}:${this.config.workspace.port}/sockets/events/{conversation_id}`
+          wsUrl = `ws://${this.config.workspace.host}:${this.config.workspace.port}${path}`
         } else {
           // Default to localhost for local development
-          wsUrl = 'ws://localhost:8001/sockets/events/{conversation_id}'
+          wsUrl = `ws://localhost:8001${path}`
         }
 
         this.ws = new WebSocket(wsUrl)
@@ -334,99 +339,4 @@ export function useHRAgentClient(config: HRAgentConfig) {
 }
 
 export type { HRAgentClient }
-export default HRAgentClient
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer)
-      this.heartbeatTimer = null
-    }
-  }
-}
-
-// React hook for HR Agent client integration
-export function useHRAgentClient(config: HRAgentConfig) {
-  const [client, setClient] = useState<HRAgentClient | null>(null)
-  const [state, setState] = useState<WebSocketState>({
-    isConnected: false,
-    isConnecting: false,
-    error: null,
-    reconnectAttempts: 0
-  })
-  const clientRef = useRef<HRAgentClient | null>(null)
-
-  const connect = useCallback(async () => {
-    if (clientRef.current) {
-      clientRef.current.disconnect()
-    }
-
-    setState(prev => ({ ...prev, isConnecting: true, error: null }))
-
-    try {
-      const newClient = new HRAgentClient(config)
-      clientRef.current = newClient
-      setClient(newClient)
-
-      // Setup event listeners
-      newClient.onEvent((event) => {
-        setState(prev => ({ ...prev, error: event.type === 'error' ? event.data.message : null }))
-      })
-
-      newClient.onMessage((message) => {
-        // Messages are handled via the regular chat store
-      })
-
-      newClient.onStatus((status) => {
-        console.log('HR Agent status:', status)
-      })
-
-      await newClient.connect()
-      setState({ isConnected: true, isConnecting: false, error: null, reconnectAttempts: 0 })
-    } catch (error) {
-      setState(prev => ({
-        ...prev,
-        isConnecting: false,
-        error: error instanceof Error ? error.message : 'Connection failed'
-      }))
-      setClient(null)
-      clientRef.current = null
-    }
-  }, [config])
-
-  const disconnect = useCallback(() => {
-    if (clientRef.current) {
-      clientRef.current.disconnect()
-    }
-    setClient(null)
-    setState({ isConnected: false, isConnecting: false, error: null, reconnectAttempts: 0 })
-    clientRef.current = null
-  }, [])
-
-  const sendMessage = useCallback((prompt: string) => {
-    if (clientRef.current) {
-      clientRef.current.sendMessage(prompt)
-    } else {
-      throw new Error('HR Agent client not connected')
-    }
-  }, [])
-
-  // Auto-connect on mount
-  useEffect(() => {
-    connect()
-    return () => {
-      if (clientRef.current) {
-        clientRef.current.disconnect()
-      }
-    }
-  }, [connect])
-
-  return {
-    ...state,
-    connect,
-    disconnect,
-    sendMessage,
-    isHRConnected: state.isConnected,
-    hrError: state.error
-  }
-}
-
-export type { HRAgentClient }
-export default HRAgentClient
+export default HRAgentClient

@@ -23,6 +23,7 @@ export interface CanvasAction {
   status: ApprovalStatus
   resolvedAt?: number
   result?: string
+  conversationId?: string
 }
 
 // A single result surfaced to the right-hand Side Canvas for review. Built from
@@ -53,6 +54,7 @@ interface CanvasState {
     toolName: string
     title: string
     params: Record<string, any>
+    conversationId?: string
   }) => void
   resolveApproval: (id: string, decision: Exclude<ApprovalStatus, 'pending'>) => void
   setOpen: (open: boolean) => void
@@ -88,7 +90,7 @@ export const useCanvas = create<CanvasState>((set) => ({
       return { artifacts, activeId: artifact.id, open: true }
     }),
 
-  openApproval: ({ toolName, title, params }) =>
+  openApproval: ({ toolName, title, params, conversationId }) =>
     set((state) => {
       const artifact: CanvasArtifact = {
         id: newId(),
@@ -97,31 +99,47 @@ export const useCanvas = create<CanvasState>((set) => ({
         title,
         data: params,
         createdAt: Date.now(),
-        action: { toolName, params, status: 'pending' },
+        action: { toolName, params, status: 'pending', conversationId },
       }
       const artifacts = [artifact, ...state.artifacts].slice(0, MAX_ARTIFACTS)
       return { artifacts, activeId: artifact.id, open: true }
     }),
 
   resolveApproval: (id, decision) =>
-    set((state) => ({
-      artifacts: state.artifacts.map((a) =>
-        a.id === id && a.action && a.action.status === 'pending'
-          ? {
-              ...a,
-              action: {
-                ...a.action,
-                status: decision,
-                resolvedAt: Date.now(),
-                result:
-                  decision === 'approved'
-                    ? 'Sent (simulated — live delivery arrives with the comms integration).'
-                    : 'Discarded. Nothing was sent.',
-              },
-            }
-          : a,
-      ),
-    })),
+    set((state) => {
+      const artifact = state.artifacts.find(a => a.id === id)
+      if (artifact?.action?.conversationId && decision !== 'pending') {
+        const accept = decision === 'approved'
+        fetch('/api/chat/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            conversationId: artifact.action.conversationId, 
+            accept,
+            reason: accept ? undefined : 'User rejected the action.'
+          }),
+        }).catch(err => console.error('Failed to confirm action:', err))
+      }
+
+      return {
+        artifacts: state.artifacts.map((a) =>
+          a.id === id && a.action && a.action.status === 'pending'
+            ? {
+                ...a,
+                action: {
+                  ...a.action,
+                  status: decision,
+                  resolvedAt: Date.now(),
+                  result:
+                    decision === 'approved'
+                      ? 'Approved. Execution resumed on the backend.'
+                      : 'Discarded. Action was rejected on the backend.',
+                },
+              }
+            : a,
+        ),
+      }
+    }),
 
   setOpen: (open) => set({ open }),
   toggle: () => set((state) => ({ open: !state.open })),
