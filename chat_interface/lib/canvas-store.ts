@@ -108,7 +108,9 @@ export const useCanvas = create<CanvasState>((set) => ({
   resolveApproval: (id, decision) =>
     set((state) => {
       const artifact = state.artifacts.find(a => a.id === id)
-      if (artifact?.action?.conversationId && decision !== 'pending') {
+      // decision is always 'approved' | 'rejected' here (resolveApproval is
+      // only called with a real decision), so no pending check is needed.
+      if (artifact?.action?.conversationId) {
         const accept = decision === 'approved'
         fetch('/api/chat/confirm', {
           method: 'POST',

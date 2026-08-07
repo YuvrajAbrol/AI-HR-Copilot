@@ -164,15 +164,19 @@ async def log_handler(message: LogMessage):
     logger.log(level, msg, extra=extra)
 
 
-async def _connect_and_list_tools(client: MCPClient) -> None:
+async def _connect_and_list_tools(
+    client: MCPClient,
+    mcp_config: dict[str, MCPServer] | None = None,
+) -> None:
     """Connect to MCP server and populate client._tools."""
     await client.connect()
-    await _refresh_tools(client)
+    await _refresh_tools(client, mcp_config=mcp_config)
 
 
 async def _refresh_tools(
     client: MCPClient,
     on_tools_changed: ToolsChangedCallback | None = None,
+    mcp_config: dict[str, MCPServer] | None = None,
 ) -> None:
     """Re-list tools from the server and reconcile ``client._tools``.
 
@@ -196,7 +200,18 @@ async def _refresh_tools(
             # shared MCPClient it closes on shutdown) stays wired up.
             reconciled.append(prior)
             continue
-        tool_sequence = MCPToolDefinition.create(mcp_tool=mcp_tool, mcp_client=client)
+        # Get tool permission from server config
+        tool_permission = None
+        if mcp_config is not None:
+            for server_spec in mcp_config.values():
+                if server_spec.tool_permissions and mcp_tool.name in server_spec.tool_permissions:
+                    tool_permission = server_spec.tool_permissions[mcp_tool.name]
+                    break
+        tool_sequence = MCPToolDefinition.create(
+            mcp_tool=mcp_tool,
+            mcp_client=client,
+            tool_permission=tool_permission,
+        )
         reconciled.extend(tool_sequence)
         added.extend(tool_sequence)
 
@@ -234,10 +249,12 @@ class _ToolListChangedHandler(MessageHandler):
         self,
         client: MCPClient,
         on_tools_changed: ToolsChangedCallback | None = None,
+        mcp_config: dict[str, MCPServer] | None = None,
     ):
         super().__init__()
         self._client = client
         self._on_tools_changed = on_tools_changed
+        self._mcp_config = mcp_config
         self._refresh_lock = asyncio.Lock()
         self._refresh_tasks: set[asyncio.Task[None]] = set()
 
@@ -260,7 +277,7 @@ class _ToolListChangedHandler(MessageHandler):
             async with self._refresh_lock:
                 if client._closed:
                     return
-                await _refresh_tools(client, self._on_tools_changed)
+                await _refresh_tools(client, self._on_tools_changed, self._mcp_config)
         except Exception:
             logger.warning(
                 "Failed to refresh MCP tools after list_changed notification",
@@ -301,13 +318,14 @@ def create_mcp_tools(
     handler = _ToolListChangedHandler(
         client=None,  # type: ignore[arg-type]
         on_tools_changed=on_tools_changed,
+        mcp_config=mcp_config,
     )
     client = MCPClient(config, log_handler=log_handler, message_handler=handler)
     handler._client = client
 
     try:
         client.call_async_from_sync(
-            _connect_and_list_tools, timeout=timeout, client=client
+            _connect_and_list_tools, timeout=timeout, client=client, mcp_config=mcp_config
         )
     except TimeoutError as e:
         client.sync_close()

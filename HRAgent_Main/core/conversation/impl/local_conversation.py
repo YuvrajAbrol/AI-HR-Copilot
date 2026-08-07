@@ -4,6 +4,8 @@ import contextlib
 import copy
 import json
 import uuid
+
+import httpx
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePath
 from typing import Any, Final, TypeGuard, cast
@@ -59,6 +61,7 @@ from models.llm.llm_registry import LLMRegistry
 from runtime.telemetry.logger import get_logger
 from plugins.marketplace import MarketplaceRegistry
 from mcp_integration.config import MCPServer, coerce_mcp_config, dump_mcp_config
+from mcp_integration.exceptions import MCPError
 from mcp_integration.utils import (
     DefaultMCPToolProvider,
     MCPToolProvider,
@@ -1249,11 +1252,24 @@ class LocalConversation(BaseConversation):
     ) -> list[ToolDefinition]:
         if not mcp_config:
             return []
-        client = self._mcp_tool_provider.create_tools(
-            mcp_config,
-            _RUNTIME_MCP_TIMEOUT_SECS,
-            on_tools_changed=on_tools_changed,
-        )
+        try:
+            client = self._mcp_tool_provider.create_tools(
+                mcp_config,
+                _RUNTIME_MCP_TIMEOUT_SECS,
+                on_tools_changed=on_tools_changed,
+            )
+        except (MCPError, ConnectionError, OSError, httpx.HTTPError) as exc:
+            # A server that can't connect (missing/revoked credentials, offline
+            # host, uninstalled runtime) must not brick the whole conversation.
+            # Surface the root cause in the logs and continue without its tools;
+            # the probe endpoint (/api/mcp/test) reports the per-server error
+            # for the UI.
+            logger.warning(
+                "MCP tool materialization failed; continuing without those "
+                "tools. Use /api/mcp/test for the per-server error: %s",
+                exc,
+            )
+            return []
         return list(client.tools)
 
     def _runtime_mcp_tools_for_agent(self) -> list[ToolDefinition]:

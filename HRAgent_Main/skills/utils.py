@@ -11,10 +11,9 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from fastmcp.mcp_config import MCPConfig
-
 from utilities.git import GitHelper, try_cached_clone_or_update
 from runtime.telemetry.logger import get_logger
+from mcp_integration.config import coerce_mcp_config
 from skills.exceptions import SkillValidationError
 from utilities.path import to_posix_path
 
@@ -264,9 +263,15 @@ def load_mcp_config(
         config, variables, get_secret=get_secret, expand_defaults=expand_defaults
     )
 
-    # Validate the external .mcp.json shape using FastMCP's config model.
+    # Validate the .mcp.json shape with the HRAgents-native config model —
+    # the exact model every consumer (plugins/plugin.py, skills/skill.py)
+    # runs on this output. It accepts native auth dicts ({strategy: "oauth2"})
+    # that FastMCP's external MCPConfig schema rejects, so marketplace
+    # integrations (Gmail, Slack, Jira, Google-*) no longer load with empty
+    # mcp_config. Configs the native model rejects fail loudly here rather
+    # than silently producing no MCP servers downstream.
     try:
-        MCPConfig.model_validate(config)
+        coerce_mcp_config(config)
     except Exception as e:
         raise SkillValidationError(f"Invalid MCP configuration: {e}") from e
 

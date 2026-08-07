@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import {
   MoreHorizontal,
   Pencil,
@@ -43,6 +43,7 @@ type StatusFilter = "all" | "connected" | "disconnected"
 export function McpConnectionsPage() {
   const {
     connections,
+    dataSource,
     testingId,
     reconnectingId,
     rotatingId,
@@ -61,7 +62,6 @@ export function McpConnectionsPage() {
   } = useMcp()
   const { setView } = useNavigation()
 
-  const [loaded, setLoaded] = useState(false)
   const [query, setQuery] = useState("")
   const [status, setStatus] = useState<StatusFilter>("all")
 
@@ -71,10 +71,10 @@ export function McpConnectionsPage() {
   const [deleteTarget, setDeleteTarget] = useState<McpConnection | null>(null)
   const [disconnectAllOpen, setDisconnectAllOpen] = useState(false)
 
-  useEffect(() => {
-    const t = setTimeout(() => setLoaded(true), 400)
-    return () => clearTimeout(t)
-  }, [])
+  // Skeleton shows only while the backend load is genuinely in flight —
+  // never a fixed timer. Once dataSource leaves "loading", render whatever
+  // the backend returned (empty list included).
+  const loading = dataSource === "loading"
 
   const detail = useMemo(() => connections.find((c) => c.id === detailId) ?? null, [connections, detailId])
 
@@ -155,7 +155,7 @@ export function McpConnectionsPage() {
         </div>
       </div>
 
-      {!loaded ? (
+      {loading ? (
         <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-[96px] animate-pulse rounded-xl border border-border/60 bg-card/30" />

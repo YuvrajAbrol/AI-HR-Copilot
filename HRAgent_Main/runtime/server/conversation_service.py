@@ -34,6 +34,7 @@ from runtime.server.models import (
     UpdateConversationRequest,
 )
 from runtime.persistence import FileSecretsStore
+from security.validation.secret import StaticSecret
 from runtime.server.pub_sub import Subscriber
 from runtime.server.server_details_router import update_last_execution_time
 from runtime.server.skills_service import discover_profile_skills
@@ -736,6 +737,23 @@ class ConversationService:
             CODEX_AUTH_SECRET_NAME,
         )
         return value is not None
+
+    def _settings_secrets_env_vars(self) -> dict[str, str]:
+        """Plaintext ``{name: value}`` for every custom secret in the store.
+
+        Reuses the store's existing ``get_env_vars`` decryption (file lock +
+        Fernet cipher) rather than per-secret ``get_secret`` calls, which would
+        reload the file once per secret. Returns an empty dict when there is no
+        store or no secrets. Callers must never log or round-trip the result to
+        the browser.
+        """
+        store = self.secrets_store
+        if store is None:
+            return {}
+        secrets = store.load()
+        if secrets is None:
+            return {}
+        return secrets.get_env_vars()
 
     async def _resolve_credential_bindings(
         self,
@@ -1458,6 +1476,31 @@ class ConversationService:
                 launched_agent_profile=launched_agent_profile,
                 **request_data,
             )
+
+        # Seed server-managed custom secrets (the settings secrets store) into the
+        # conversation so `${VAR}` placeholders in plugin/skill .mcp.json resolve
+        # at conversation build (LocalConversation expands them via
+        # secret_registry.get_secret_value). This is the same channel provider
+        # credentials already ride (StoredConversation.secrets →
+        # LocalConversation(secrets=...) → secret_registry). Explicitly supplied
+        # request secrets win over store values. Values are wrapped in
+        # StaticSecret and cipher-encrypted at rest alongside the conversation,
+        # so this adds no new secret storage — it only makes the configured
+        # secrets store reachable from the conversation runtime.
+        if self.secrets_store is not None:
+            store_secrets = await asyncio.to_thread(self._settings_secrets_env_vars)
+            if store_secrets:
+                merged = dict(stored.secrets)
+                for name, value in store_secrets.items():
+                    if name not in merged:
+                        # Wrapped as a StaticSecret (not a plain str) because
+                        # StoredConversation.secrets is typed dict[str, SecretSource]
+                        # — a discriminated union whose wrap serializer fails on raw
+                        # strings (''str' has no attribute _is_handler_for_current_class').
+                        merged[name] = StaticSecret(value=value)
+                if merged != stored.secrets:
+                    stored = stored.model_copy(update={"secrets": merged})
+
         async with self._lifecycle_lock:
             event_service = await self._start_event_service(
                 stored, is_new_conversation=True

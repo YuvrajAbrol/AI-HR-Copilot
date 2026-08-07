@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "google-chat": {
+      "transport": "streamable-http",
+      "url": "https://chatmcp.googleapis.com/mcp/v1",
+      "auth": {
+        "strategy": "oauth2"
+      }
+    }
+  }
+}

@@ -29,7 +29,8 @@ import {
 } from "@/components/ui/dialog"
 import { OptionMenu } from "@/components/option-menu"
 import { DrawerShell, Tag } from "@/components/management/shared"
-import { uid } from "./mcp-data"
+import { uid } from "@/lib/mcp-util"
+import * as mcpApi from "@/lib/mcp-api"
 import {
   AUTH_METHODS,
   SERVER_TYPES,
@@ -38,6 +39,15 @@ import {
   type McpConnection,
   type ServerType,
 } from "./mcp-types"
+
+/* UI auth label -> settings mcp_config auth strategy. */
+const AUTH_LABEL_TO_STRATEGY: Record<string, string> = {
+  "API Key": "api_key",
+  "Bearer Token": "bearer",
+  Basic: "basic",
+  Header: "header",
+  "OAuth 2.0": "oauth2",
+}
 
 /* ------------------------------------------------------------------ */
 /*  Shared form pieces                                                 */
@@ -150,34 +160,25 @@ function EnvVarsField({
 }
 
 function TestConnectionButton({
-  url,
   testing,
-  tested,
-  onResult,
+  onTest,
 }: {
-  url: string
   testing: boolean
-  tested: boolean
-  onResult: (ok: boolean, detail: string) => void
+  onTest: () => Promise<{ ok: boolean; detail: string }>
 }) {
-  const handleTest = () => {
-    if (!url.trim()) {
-      toast.error("Enter a server URL first")
-      return
+  const [busy, setBusy] = useState(false)
+  const handleTest = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const result = await onTest()
+      if (result.ok) toast.success(result.detail)
+      else toast.error(result.detail)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Connection test failed")
+    } finally {
+      setBusy(false)
     }
-    onResult(false, "") // reset previous state before testing
-    toast.loading("Testing connection...", { id: "mcp-dialog-test" })
-    setTimeout(() => {
-      const invalid = url.toLowerCase().includes("test.fail") || url.toLowerCase().includes("invalid")
-      if (invalid) {
-        onResult(false, "Connection refused. The server did not respond to the handshake. Check the URL and credentials.")
-        toast.error("Connection failed", { id: "mcp-dialog-test" })
-      } else {
-        const tools = 4 + Math.floor(Math.random() * 5)
-        onResult(true, `Connection successful. ${tools} tools discovered`)
-        toast.success(`Connection successful. ${tools} tools discovered`, { id: "mcp-dialog-test" })
-      }
-    }, 900)
   }
 
   return (
@@ -185,13 +186,33 @@ function TestConnectionButton({
       type="button"
       variant="secondary"
       onClick={handleTest}
-      disabled={testing}
+      disabled={busy || testing}
       className="gap-2 border border-border/60 bg-secondary/60 hover:bg-secondary"
     >
-      {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
       Test
     </Button>
   )
+}
+
+/** Real probe for the dialog forms: builds a remote server spec from the form
+ *  state and calls POST /api/mcp/test. Never fabricates a result. */
+async function probeDialogServer(opts: {
+  url: string
+  serverType: ServerType
+  apiKey?: string
+}): Promise<{ ok: boolean; detail: string }> {
+  if (!opts.url.trim()) return { ok: false, detail: "Enter a server URL first" }
+  if (opts.serverType === "Stdio") {
+    return { ok: false, detail: "Stdio servers are tested from the MCP server list after saving." }
+  }
+  const spec: mcpApi.McpTestServerSpec = opts.serverType === "SSE" ? { type: "sse", url: opts.url.trim() } : { type: "http", url: opts.url.trim() }
+  if (opts.apiKey) spec.api_key = opts.apiKey
+  const result = await mcpApi.testServer({ server: spec, timeout: 15 })
+  if (result.ok) {
+    return { ok: true, detail: `Connection successful. ${result.tools.length} tools discovered` }
+  }
+  return { ok: false, detail: result.error }
 }
 
 /* ------------------------------------------------------------------ */
@@ -218,9 +239,9 @@ export function McpConnectionDialog({
   const [apiKey, setApiKey] = useState("")
   const [envVars, setEnvVars] = useState<EnvVar[]>(connection?.envVars ?? [])
   const [connectAfterSave, setConnectAfterSave] = useState(connection?.connected ?? true)
-  const [testState, setTestState] = useState<{ state: "idle" | "testing" | "ok" | "fail"; detail?: string }>(
-    isEditing ? { state: "ok", detail: "Previously verified" } : { state: "idle" },
-  )
+  const [testState, setTestState] = useState<{ state: "idle" | "testing" | "ok" | "fail"; detail?: string }>({
+    state: "idle",
+  })
 
   const handleTestResult = (ok: boolean, detail: string) =>
     setTestState(ok ? { state: "ok", detail } : { state: "fail", detail })
@@ -235,17 +256,16 @@ export function McpConnectionDialog({
       return
     }
 
-    const tools =
-      connection?.tools ?? [
-        { name: "tool_a", description: "First discovered tool", enabled: true, permission: "allow" as const, calls24h: 0 },
-        { name: "tool_b", description: "Second discovered tool", enabled: true, permission: "allow" as const, calls24h: 0 },
-        { name: "tool_c", description: "Third discovered tool", enabled: true, permission: "allow" as const, calls24h: 0 },
-      ]
-    const now = new Date()
-    const createdLabel = now.toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" })
+    // Only form-derived fields are emitted. Tools, health, uptime and history
+    // are never fabricated here — the store rebuilds connections from the
+    // backend response, so placeholders are immediately superseded.
+    const config: Record<string, unknown> = { ...(connection?.config ?? {}) }
+    if (authMethod !== "None" && apiKey.trim()) {
+      config.auth = { strategy: AUTH_LABEL_TO_STRATEGY[authMethod] ?? "bearer", value: apiKey.trim() }
+    }
 
     onSave({
-      id: connection?.id ?? `mcp-${uid()}`,
+      id: connection?.id ?? name.trim(),
       name: name.trim(),
       description: description.trim() || "Custom MCP connection.",
       connected: connectAfterSave,
@@ -253,52 +273,28 @@ export function McpConnectionDialog({
       url: url.trim(),
       auth: authMethod,
       authConfigured: authMethod !== "None" ? Boolean(apiKey) || Boolean(connection?.authConfigured) : false,
-      authTokenPreview: apiKey
-        ? `${apiKey.slice(0, 4)}••••••••${apiKey.slice(-4)}`
-        : connection?.authTokenPreview,
+      authTokenPreview: apiKey ? `••••••••••••••••••${apiKey.slice(-4)}` : connection?.authTokenPreview,
       envVars: envVars.filter((v) => v.key.trim() !== ""),
-      tools,
+      tools: connection?.tools ?? [],
       category: connection?.category ?? "Custom",
-      latencyMs: connection?.latencyMs ?? Math.floor(40 + Math.random() * 160),
-      health: connectAfterSave ? "healthy" : "unknown",
-      lastUsed: connection?.lastUsed ?? "just now",
-      created: connection?.created ?? createdLabel,
+      latencyMs: connection?.latencyMs ?? 0,
+      health: "unknown",
+      lastUsed: connection?.lastUsed ?? "never",
+      created: connection?.created ?? "",
       icon: connection?.icon ?? Server,
-      uptimePercent: connection?.uptimePercent ?? (connectAfterSave ? 100 : 0),
-      lastHealthCheck: connectAfterSave ? "just now" : "never",
-      errorCount24h: connection?.errorCount24h ?? 0,
-      latencyTrend: connection?.latencyTrend ?? "stable",
-      totalCalls: connection?.totalCalls ?? 0,
-      calls24h: connection?.calls24h ?? 0,
-      serverVersion: connection?.serverVersion ?? "Not set",
-      protocolVersion: connection?.protocolVersion ?? "2025-03-26",
-      eventLog:
-        connection?.eventLog ??
-        [
-          {
-            id: `e-${uid()}`,
-            title: "Connection established",
-            detail: "Custom MCP server connected",
-            time: "just now",
-            ts: Date.now(),
-            status: "success",
-            iconName: "plug",
-          },
-        ],
-      history:
-        connection?.history ??
-        [
-          {
-            id: `h-${uid()}`,
-            kind: "connect",
-            title: "Connected",
-            detail: "Handshake completed",
-            time: "just now",
-            ts: Date.now(),
-          },
-        ],
+      uptimePercent: 0,
+      lastHealthCheck: "never",
+      errorCount24h: 0,
+      latencyTrend: "stable",
+      totalCalls: 0,
+      calls24h: 0,
+      serverVersion: "",
+      protocolVersion: "",
+      eventLog: connection?.eventLog ?? [],
+      history: connection?.history ?? [],
+      config,
     })
-    toast.success(isEditing ? `${name.trim()} updated` : `${name.trim()} connected`)
+    toast.success(isEditing ? `${name.trim()} updated` : `${name.trim()} saved`)
     onOpenChange(false)
   }
 
@@ -432,7 +428,15 @@ export function McpConnectionDialog({
             {testState.state === "testing" ? (
               <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
             ) : (
-              <TestConnectionButton url={url} testing={false} tested={testState.state === "ok"} onResult={handleTestResult} />
+              <TestConnectionButton
+                testing={false}
+                onTest={() =>
+                  probeDialogServer({ url, serverType, apiKey: apiKey || undefined }).then((r) => {
+                    handleTestResult(r.ok, r.detail)
+                    return r
+                  })
+                }
+              />
             )}
           </div>
       </div>
@@ -565,7 +569,15 @@ export function McpInstallDialog({
             {testState.state === "testing" ? (
               <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
             ) : (
-              <TestConnectionButton url={server.url} testing={false} tested={testState.state === "ok"} onResult={handleTestResult} />
+              <TestConnectionButton
+                testing={false}
+                onTest={() =>
+                  probeDialogServer({ url: server.url, serverType: server.serverType, apiKey: apiKey || undefined }).then((r) => {
+                    handleTestResult(r.ok, r.detail)
+                    return r
+                  })
+                }
+              />
             )}
           </div>
         </div>

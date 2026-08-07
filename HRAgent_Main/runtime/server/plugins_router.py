@@ -9,6 +9,7 @@ focused on HTTP concerns. It exposes:
 * The plugins-only marketplace catalog.
 """
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Path
@@ -148,7 +149,11 @@ class InstalledPluginResponse(BaseModel):
             source=info.source,
             resolved_ref=info.resolved_ref,
             repo_path=info.repo_path,
-            installed_at=info.installed_at,
+            installed_at=(
+                datetime.fromtimestamp(info.installed_at).isoformat()
+                if info.installed_at
+                else ""
+            ),
             install_path=str(info.install_path),
         )
 

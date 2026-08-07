@@ -441,6 +441,9 @@ class MCPServer(_MCPBaseModel):
     keep_alive: bool | None = None
     headers: dict[str, SecretStr] | None = None
     auth: MCPAuthCredential | None = None
+    # Per-tool permission overrides: tool_name -> "allow" | "deny" | "ask"
+    # When not present, tools inherit the default permission (allow for read, ask for write)
+    tool_permissions: dict[str, Literal["allow", "deny", "ask"]] | None = None
 
     @field_validator("env", "headers", mode="after")
     @classmethod

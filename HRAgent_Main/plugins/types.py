@@ -252,6 +252,24 @@ class PluginManifest(BaseModel):
             "Example: 'now' for a command defined in commands/now.md"
         ),
     )
+    # Integration metadata (MCP marketplace). Mirrored by
+    # MarketplaceIntegration so the catalog UI needs no directory reads.
+    category: str | None = Field(
+        default=None,
+        description="Marketplace category, e.g. 'Communication'.",
+    )
+    authentication: str | None = Field(
+        default=None,
+        description="Auth method label, e.g. 'OAuth 2.0' / 'API Key' / 'PAT'.",
+    )
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Tool names exposed by the integration's MCP server.",
+    )
+    mcp: bool = Field(
+        default=True,
+        description="True when this plugin is an MCP integration.",
+    )
 
     model_config = {"extra": "allow"}
 

@@ -1,0 +1,17 @@
+{
+  "name": "microsoft-365",
+  "version": "1.0.0",
+  "description": "Microsoft 365 integration — Outlook mail/calendar, contacts, OneDrive and (org mode) Teams/SharePoint via ms-365-mcp-server.",
+  "category": "Communication",
+  "authentication": "Microsoft Entra ID (OAuth)",
+  "tools": [
+    "send_email",
+    "get_emails",
+    "get_calendar_events",
+    "create_calendar_event",
+    "get_contacts",
+    "get_files",
+    "search_files"
+  ],
+  "mcp": true
+}

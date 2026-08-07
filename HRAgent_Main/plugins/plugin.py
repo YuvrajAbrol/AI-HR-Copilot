@@ -348,6 +348,15 @@ def _load_manifest(plugin_dir: Path) -> PluginManifest:
             manifest_path = candidate
             break
 
+    # Also accept a root-level plugin.json (marketplace integration layout —
+    # marketplaces/integrations/<name>/plugin.json). Without this, installed
+    # plugins fall back to directory-name inference and drop their real
+    # description/version/category metadata.
+    if manifest_path is None:
+        root_candidate = plugin_dir / PLUGIN_MANIFEST_FILE
+        if root_candidate.exists():
+            manifest_path = root_candidate
+
     if manifest_path:
         try:
             with open(manifest_path, encoding="utf-8") as f:

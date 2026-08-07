@@ -1,0 +1,18 @@
+{
+  "name": "google-drive",
+  "version": "1.0.0",
+  "description": "Google Drive integration — list, read, search and upload files via official Google MCP server (https://drivemcp.googleapis.com/mcp/v1, OAuth2).",
+  "category": "Storage",
+  "authentication": "Google OAuth 2.0",
+  "tools": [
+    "copy_file",
+    "create_file",
+    "download_file_content",
+    "get_file_metadata",
+    "get_file_permissions",
+    "list_recent_files",
+    "read_file_content",
+    "search_files"
+  ],
+  "mcp": true
+}

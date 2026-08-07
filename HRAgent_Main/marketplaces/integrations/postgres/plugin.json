@@ -1,0 +1,15 @@
+{
+  "name": "postgres",
+  "version": "1.0.0",
+  "description": "PostgreSQL integration — schema inspection and SQL queries via Postgres MCP Pro. Restricted (read-only, time-limited) mode by default.",
+  "category": "Databases",
+  "authentication": "DATABASE_URI",
+  "tools": [
+    "query",
+    "get_schema",
+    "list_databases",
+    "list_tables",
+    "describe_table"
+  ],
+  "mcp": true
+}

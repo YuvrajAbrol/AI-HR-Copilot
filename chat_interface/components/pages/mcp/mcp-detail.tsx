@@ -89,22 +89,6 @@ const HISTORY_META: Record<HistoryEvent["kind"], { icon: typeof Plug; className:
   auth: { icon: KeyRound, className: "text-violet-400" },
 }
 
-function revealedToken(auth: string): string {
-  // Demo-only placeholder tokens for the mock MCP connections UI. These are
-  // NOT real credentials — kept clearly non-secret-shaped so the repo never
-  // trips secret scanners (no live-key, PAT, or JWT-looking strings).
-  switch (auth) {
-    case "OAuth 2.0":
-      return "demo-oauth-token-0123456789abcdef"
-    case "API Key":
-      return "demo-api-key-0123456789abcdef"
-    case "Bearer Token":
-      return "demo-bearer-token-0123456789abcdef"
-    default:
-      return ""
-  }
-}
-
 /* ------------------------------------------------------------------ */
 /*  Detail panel                                                       */
 /* ------------------------------------------------------------------ */
@@ -334,20 +318,17 @@ function OverviewTab({ conn }: { conn: McpConnection }) {
 
   return (
     <div className="flex flex-col gap-5">
+      {/* Only real, probe-backed values are shown here — never fabricated
+          uptime/error/call counters. latencyMs & health come from the last
+          POST /api/mcp/test. */}
       <div className="grid grid-cols-3 gap-3">
-        <StatCell
-          label="Uptime (7d)"
-          value={`${conn.uptimePercent}%`}
-          className={
-            conn.uptimePercent >= 99 ? "text-emerald-400" : conn.uptimePercent >= 95 ? "text-amber-400" : "text-red-400"
-          }
-        />
         <StatCell label="Last check" value={conn.lastHealthCheck} className="text-foreground" />
         <StatCell
-          label="Errors (24h)"
-          value={String(conn.errorCount24h)}
-          className={conn.errorCount24h === 0 ? "text-emerald-400" : "text-red-400"}
+          label="Latency"
+          value={conn.latencyMs > 0 ? `${conn.latencyMs} ms` : "—"}
+          className="text-foreground"
         />
+        <StatCell label="Tools" value={String(enabledTools)} className="text-foreground" />
       </div>
 
       <PanelSection title="Endpoint">
@@ -370,18 +351,8 @@ function OverviewTab({ conn }: { conn: McpConnection }) {
         <div className="divide-y divide-border/50">
           <DetailRow label="Type" value={<Tag>{conn.serverType}</Tag>} />
           <DetailRow label="Authentication" value={conn.auth} />
-          <DetailRow label="Server version" value={conn.serverVersion} mono />
-          <DetailRow label="Protocol" value={conn.protocolVersion} mono />
           <DetailRow label="Category" value={conn.category} />
           <DetailRow label="Created" value={conn.created} />
-        </div>
-      </PanelSection>
-
-      <PanelSection title="Usage">
-        <div className="divide-y divide-border/50">
-          <DetailRow label="Total calls" value={conn.totalCalls.toLocaleString()} />
-          <DetailRow label="Calls (24h)" value={conn.calls24h.toLocaleString()} />
-          <DetailRow label="Last used" value={conn.lastUsed} />
         </div>
       </PanelSection>
 
@@ -501,7 +472,6 @@ function ToolsTab({
                   <StatusBadge status={PERMISSION_META[tool.permission].tone}>{PERMISSION_META[tool.permission].label}</StatusBadge>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">{tool.description}</p>
-                <p className="mt-1 text-[11px] tabular-nums text-muted-foreground/70">{tool.calls24h} calls / 24h</p>
               </div>
               <div className="flex shrink-0 items-center gap-3">
                 <PermissionMenu
@@ -612,13 +582,14 @@ function AuthSection({
   onRevokeAuth: (id: string) => void
   rotating: boolean
 }) {
-  const [revealed, setRevealed] = useState(false)
   const [settingKey, setSettingKey] = useState(false)
   const [newKey, setNewKey] = useState("")
   const [showNewKey, setShowNewKey] = useState(false)
 
   const noAuth = conn.auth === "None"
-  const token = revealed ? revealedToken(conn.auth) : conn.authTokenPreview ?? "••••••••••••"
+  // Only the real masked preview from the backend config is shown — secrets
+  // never round-trip to the browser, so there is nothing to "reveal" or copy.
+  const token = conn.authTokenPreview ?? "••••••••••••"
 
   const handleSaveKey = () => {
     if (!newKey.trim()) {
@@ -661,23 +632,6 @@ function AuthSection({
               <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-secondary/40 px-3 py-2">
                 <Lock className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <code className="flex-1 truncate font-mono text-[13px] text-foreground">{token}</code>
-                <button
-                  onClick={() => setRevealed((v) => !v)}
-                  className="text-muted-foreground transition-colors hover:text-foreground"
-                  aria-label={revealed ? "Hide token" : "Reveal token"}
-                >
-                  {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-                <button
-                  onClick={() => {
-                    navigator.clipboard?.writeText(revealedToken(conn.auth))
-                    toast.success("Token copied")
-                  }}
-                  className="text-muted-foreground transition-colors hover:text-foreground"
-                  aria-label="Copy token"
-                >
-                  <Copy className="h-3.5 w-3.5" />
-                </button>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -777,11 +731,10 @@ function EnvVarsManager({
   const handleSave = () => {
     const cleaned = rows.filter((r) => r.key.trim() !== "")
     setSaving(true)
-    setTimeout(() => {
-      onSaveConfig(conn.id, { envVars: cleaned })
-      setSaving(false)
-      toast.success("Environment variables saved")
-    }, 400)
+    // Fire the backend PATCH immediately — the spinner covers the real latency.
+    onSaveConfig(conn.id, { envVars: cleaned })
+    setSaving(false)
+    toast.success("Environment variables saved")
   }
 
   return (

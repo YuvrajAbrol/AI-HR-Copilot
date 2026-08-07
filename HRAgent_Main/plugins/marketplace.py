@@ -64,6 +64,31 @@ class MarketplaceSkill(BaseModel):
     description: str | None = None
 
 
+class MarketplaceIntegration(BaseModel):
+    """A single MCP integration advertised by a marketplace manifest.
+
+    Integrations follow the plugin installation model: each one is a normal
+    plugin directory (``plugin.json`` + ``.mcp.json``) whose ``.mcp.json``
+    registers external MCP servers. ``category``/``authentication``/``tools``
+    mirror the plugin manifest fields so the catalog UI can render them without
+    reading the plugin directory itself.
+    """
+
+    name: str
+    source: str | MarketplaceEntrySource
+    description: str | None = None
+    category: str | None = Field(
+        default=None, description="Marketplace category, e.g. 'Communication'."
+    )
+    authentication: str | None = Field(
+        default=None, description="Auth method label, e.g. 'OAuth 2.0' / 'API Key'."
+    )
+    tools: list[str] = Field(
+        default_factory=list, description="Tool names exposed by the integration."
+    )
+    mcp: bool = Field(default=True, description="True when this is an MCP integration.")
+
+
 class Marketplace(BaseModel):
     """A marketplace manifest (``marketplaces/default.json`` or similar)."""
 
@@ -72,6 +97,10 @@ class Marketplace(BaseModel):
     )
     plugins: list[MarketplacePlugin] = Field(default_factory=list)
     skills: list[MarketplaceSkill] = Field(default_factory=list)
+    integrations: list[MarketplaceIntegration] = Field(
+        default_factory=list,
+        description="MCP integrations advertised by this marketplace.",
+    )
 
     @classmethod
     def load(cls, repo_path: Path) -> "Marketplace":
@@ -102,6 +131,15 @@ class Marketplace(BaseModel):
 
     def resolve_skill_source(self, entry: MarketplaceSkill) -> tuple[str, str | None, str | None]:
         """Resolve a skill entry to ``(source, ref, repo_path)``."""
+        return self._resolve_entry_source(entry)
+
+    def resolve_integration_source(self, entry: MarketplaceIntegration) -> tuple[str, str | None, str | None]:
+        """Resolve an integration entry to ``(source, ref, repo_path)``.
+
+        Relative string sources (e.g. ``./integrations/gmail``) are rewritten
+        to absolute paths inside the marketplace clone, so they flow through
+        ``InstallationManager`` unchanged.
+        """
         return self._resolve_entry_source(entry)
 
     def _resolve_entry_source(self, entry: Any) -> tuple[str, str | None, str | None]:

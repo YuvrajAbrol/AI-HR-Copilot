@@ -1,7 +1,6 @@
 "use client"
 
 import { useState, useEffect, useCallback, useRef } from "react"
-import { AgentRuntimeState, RunEvent, EventCategory, EventStatus } from "./agent-runtime"
 
 // HR Agent SDK Types (aligned with actual SDK structure)
 export interface HRAgentMessage {
@@ -106,16 +105,16 @@ class HRAgentClient {
         this.ws.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data)
-            this.handleHRMessage(data)
+            this.handleMessage(data)
           } catch (error) {
             console.error('Failed to parse HR Agent WebSocket message:', error)
-            this.emitHRAgentEvent('error', { message: 'Failed to parse HR Agent message', error })
+            this.emitEvent('error', { message: 'Failed to parse HR Agent message', error })
           }
         }
 
         this.ws.onerror = (error) => {
           console.error('HR Agent WebSocket error:', error)
-          this.emitHRAgentEvent('error', { message: 'HR Agent WebSocket connection error', error })
+          this.emitEvent('error', { message: 'HR Agent WebSocket connection error', error })
         }
 
         this.ws.onclose = () => {
@@ -166,7 +165,7 @@ class HRAgentClient {
     }
 
     this.ws.send(JSON.stringify(message))
-    this.emitHRAgentEvent('message', message)
+    this.emitEvent('message', message)
   }
 
   public setConversationId(conversationId: string): void {
@@ -212,7 +211,7 @@ class HRAgentClient {
     }
   }
 
-  private emitEvent(type: string, data: any): void {
+  private emitEvent(type: HRAgentEvent["type"], data: any): void {
     const event: HRAgentEvent = { type, data, timestamp: new Date() }
     this.eventCallbacks.forEach(callback => callback(event))
   }

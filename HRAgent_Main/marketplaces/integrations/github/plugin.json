@@ -1,0 +1,21 @@
+{
+  "name": "github",
+  "version": "1.0.0",
+  "description": "GitHub integration via the official GitHub MCP server (hosted remote). Search code/repos, read and manage issues and pull requests.",
+  "category": "Development",
+  "authentication": "Personal Access Token (PAT)",
+  "tools": [
+    "search_repositories",
+    "search_code",
+    "search_issues",
+    "get_file_contents",
+    "list_commits",
+    "get_issue",
+    "list_issues",
+    "create_issue",
+    "update_issue",
+    "get_pull_request",
+    "list_pull_requests"
+  ],
+  "mcp": true
+}

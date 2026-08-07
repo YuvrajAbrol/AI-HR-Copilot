@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from time import monotonic
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from runtime.telemetry.logger import get_logger
 from plugins.marketplace import Marketplace
@@ -219,6 +219,12 @@ class MarketplacePluginInfo(BaseModel):
     ref: str | None = None
     repo_path: str | None = None
     installed: bool
+    # Integration metadata (MCP marketplace). Present for entries advertised as
+    # integrations (bundled marketplace); None/empty otherwise.
+    category: str | None = None
+    authentication: str | None = None
+    tools: list[str] = Field(default_factory=list)
+    mcp: bool = True
     # Local contents — populated when the entry resolves to a directory in the
     # local marketplace clone; None when contents are not locally available
     # (e.g. a structured source pointing at another repository).
@@ -288,10 +294,13 @@ def service_get_plugins_marketplace_catalog(
     installed_names = {
         p.name for p in list_installed_plugins(installed_dir=installed_dir)
     }
-    return [
+    stamped = [
         entry.model_copy(update={"installed": entry.name in installed_names})
         for entry in entries
     ]
+    # Append integrations advertised by the bundled (network-free) marketplace.
+    stamped.extend(_bundled_integration_entries(installed_names))
+    return stamped
 
 
 def _is_true_plugin(raw_source: object) -> bool:
@@ -324,7 +333,10 @@ def _fetch_plugin_catalog_entries(
         PUBLIC_SKILLS_REPO, PUBLIC_SKILLS_REF, cache_dir
     )
 
-    if repo_path is None:
+    # try_cached_clone_or_update returns a falsy value (None or False) on
+    # failure — guard on truthiness so a failed clone falls through cleanly
+    # instead of passing a non-path into Marketplace.load.
+    if not repo_path:
         logger.warning("Failed to access public extensions repository")
         return []
 
@@ -389,4 +401,64 @@ def _fetch_plugin_catalog_entries(
                 )
         entries.append(entry)
 
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Bundled integrations marketplace (network-free)
+# ---------------------------------------------------------------------------
+# The public extensions repo is the primary catalog, but it must be git-cloned
+# (network-bound). The bundled marketplace ships with the server so the
+# integrations catalog is available even offline: a manifest at
+# ``marketplaces/default.json`` advertising integrations under
+# ``marketplaces/integrations/<name>``, resolved via the same
+# ``Marketplace.resolve_integration_source`` path rewrite used for remote
+# catalogs. ``Marketplace.load`` anchors relative sources at the repository
+# root, so entries use ``./marketplaces/integrations/<name>`` as their source.
+# This file is HRAgent_Main/runtime/server/plugins_service.py, so parents[2] is
+# HRAgent_Main/ (parents[0] = runtime/server, parents[1] = runtime).
+_BUNDLED_MARKETPLACE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_bundled_marketplace() -> Marketplace | None:
+    """Load the bundled marketplace manifest, or None when unavailable."""
+    if not (_BUNDLED_MARKETPLACE_ROOT / "marketplaces" / "default.json").is_file():
+        return None
+    try:
+        return Marketplace.load(_BUNDLED_MARKETPLACE_ROOT)
+    except Exception:
+        logger.warning("Failed to load bundled marketplace", exc_info=True)
+        return None
+
+
+def _bundled_integration_entries(
+    installed_names: set[str],
+) -> list[MarketplacePluginInfo]:
+    """Catalog entries for integrations advertised by the bundled marketplace."""
+    marketplace = _load_bundled_marketplace()
+    if marketplace is None:
+        return []
+    entries: list[MarketplacePluginInfo] = []
+    for entry in marketplace.integrations:
+        try:
+            source, ref, repo_path = marketplace.resolve_integration_source(entry)
+        except Exception:
+            logger.warning(
+                f"Failed to resolve integration {entry.name!r}", exc_info=True
+            )
+            continue
+        entries.append(
+            MarketplacePluginInfo(
+                name=entry.name,
+                description=entry.description,
+                source=source,
+                ref=ref,
+                repo_path=repo_path,
+                installed=entry.name in installed_names,
+                category=entry.category,
+                authentication=entry.authentication,
+                tools=entry.tools,
+                mcp=entry.mcp,
+            )
+        )
     return entries

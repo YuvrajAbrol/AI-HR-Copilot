@@ -919,7 +919,7 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
       if (pendingStep && pendingStep.toolName && conversationId) {
         useCanvas.getState().openApproval({
           toolName: pendingStep.toolName,
-          title: actionTitle({ tool_name: pendingStep.toolName }), 
+          title: actionTitle(pendingStep.toolName, pendingStep.rawParams || {}),
           params: pendingStep.rawParams || {},
           conversationId,
         })

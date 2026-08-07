@@ -69,6 +69,9 @@ export interface McpConnection {
   errorMessage?: string
   eventLog: EventLogItem[]
   history: HistoryEvent[]
+  /** Raw backend server config (settings.mcp_config entry) — used to build
+   *  probe requests. Never rendered. */
+  config?: Record<string, unknown>
 }
 
 export interface LibraryServer {
@@ -82,6 +85,14 @@ export interface LibraryServer {
   tools: string[]
   icon: LucideIcon
   docUrl?: string
+  /** Install coordinates from the backend marketplace catalog. */
+  source?: string
+  ref?: string | null
+  repo_path?: string | null
+  /** True when the catalog entry is an MCP integration (Phase 3-4). */
+  mcp?: boolean
+  /** Auth method label exposed by the catalog, e.g. "OAuth 2.0". */
+  authentication?: string
 }
 
 export const SERVER_TYPES: ServerType[] = ["HTTP", "SSE", "Stdio", "WebSocket"]

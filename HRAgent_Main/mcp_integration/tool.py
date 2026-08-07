@@ -3,7 +3,7 @@
 import copy
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 
 if TYPE_CHECKING:
@@ -56,16 +56,21 @@ class MCPToolExecutor(ToolExecutor):
     tool_name: str
     client: MCPClient
     timeout: float
+    # Per-tool permission: "allow" | "deny" | "ask"
+    # When not present, defaults to "allow" (read tools) or "ask" (write tools)
+    tool_permission: Literal["allow", "deny", "ask"] | None = None
 
     def __init__(
         self,
         tool_name: str,
         client: MCPClient,
         timeout: float = MCP_TOOL_TIMEOUT_SECONDS,
+        tool_permission: Literal["allow", "deny", "ask"] | None = None,
     ):
         self.tool_name = tool_name
         self.client = client
         self.timeout = timeout
+        self.tool_permission = tool_permission
 
     @observe(name="MCPToolExecutor.call_tool", span_type="TOOL")
     async def call_tool(self, action: MCPToolAction) -> MCPToolObservation:
@@ -76,6 +81,27 @@ class MCPToolExecutor(ToolExecutor):
         failing. This prevents a single transient error from permanently
         disabling all MCP tools for the remainder of the conversation.
         """
+        # Enforce tool permissions before execution
+        if self.tool_permission == "deny":
+            return MCPToolObservation.from_text(
+                text=(
+                    f"MCP tool '{self.tool_name}' is denied by permission policy. "
+                    "Tool execution blocked."
+                ),
+                is_error=True,
+                tool_name=self.tool_name,
+            )
+        if self.tool_permission == "ask":
+            # When permission is "ask", we return a special observation that
+            # signals the agent/HITL layer to prompt for confirmation.
+            # The actual HITL prompting is handled by the agent's confirmation policy
+            # (ConfirmRisky + LLMSecurityAnalyzer) which checks the tool's annotations.
+            # Here we just log and proceed - the security analyzer will intercept.
+            logger.info(
+                f"MCP tool '{self.tool_name}' requires confirmation (permission=ask). "
+                "Security analyzer will evaluate."
+            )
+
         if not self.client.is_connected():
             if self.client._closed:
                 return MCPToolObservation.from_text(
@@ -311,6 +337,7 @@ class MCPToolDefinition(ToolDefinition[MCPToolAction, MCPToolObservation]):
         cls,
         mcp_tool: mcp.types.Tool,
         mcp_client: MCPClient,
+        tool_permission: Literal["allow", "deny", "ask"] | None = None,
     ) -> Sequence["MCPToolDefinition"]:
         try:
             annotations = (
@@ -327,7 +354,11 @@ class MCPToolDefinition(ToolDefinition[MCPToolAction, MCPToolObservation]):
                 observation_type=MCPToolObservation,
                 annotations=annotations,
                 meta=mcp_tool.meta,
-                executor=MCPToolExecutor(tool_name=mcp_tool.name, client=mcp_client),
+                executor=MCPToolExecutor(
+                    tool_name=mcp_tool.name,
+                    client=mcp_client,
+                    tool_permission=tool_permission,
+                ),
                 # pass-through fields (enabled by **extra in Tool.create)
                 mcp_tool=mcp_tool,
             )

@@ -1,378 +1,735 @@
 "use client"
 
-import { createContext, useContext, useState, useMemo, type ReactNode } from "react"
+import { createContext, useContext, useState, useMemo, useCallback, useEffect, type ReactNode } from "react"
 import { toast } from "sonner"
-import { INITIAL_CONNECTIONS, uid } from "@/components/pages/mcp/mcp-data"
+import { uid, timeAgo } from "@/lib/mcp-util"
+import {
+  BarChart3,
+  Boxes,
+  Bug,
+  Database,
+  FileText,
+  FolderOpen,
+  GitBranch,
+  Mail,
+  MessageSquare,
+  Plug,
+  Search as SearchIcon,
+  Terminal,
+  Zap,
+  type LucideIcon,
+} from "lucide-react"
+import * as mcpApi from "@/lib/mcp-api"
 import type {
+  EnvVar,
   Health,
-  HistoryEvent,
   LibraryServer,
   LogStatus,
   McpConnection,
   McpTool,
+  ServerType,
 } from "@/components/pages/mcp/mcp-types"
 
-function todayLabel(): string {
-  return new Date().toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric" })
+/* ------------------------------------------------------------------ */
+/*  Server-config -> McpConnection mapping (backend is source of truth) */
+/* ------------------------------------------------------------------ */
+
+const TRANSPORT_TO_TYPE: Record<string, ServerType> = {
+  stdio: "Stdio",
+  http: "HTTP",
+  "streamable-http": "HTTP",
+  sse: "SSE",
 }
+
+const AUTH_STRATEGY_LABEL: Record<string, string> = {
+  none: "None",
+  api_key: "API Key",
+  bearer: "Bearer Token",
+  basic: "Basic",
+  header: "Header",
+  oauth2: "OAuth 2.0",
+}
+
+function iconForName(name: string): LucideIcon {
+  const n = name.toLowerCase()
+  if (/(github|git)/.test(n)) return GitBranch
+  if (/(postgres|sql|mysql|database|db)/.test(n)) return Database
+  if (/(slack|chat|message|teams)/.test(n)) return MessageSquare
+  if (/(notion|doc|wiki)/.test(n)) return FileText
+  if (/(gmail|google|mail|outlook|email)/.test(n)) return Mail
+  if (/(jira|atlassian|linear|ticket)/.test(n)) return Bug
+  if (/(linear|box)/.test(n)) return Boxes
+  if (/(drive|storage|folder|onedrive)/.test(n)) return FolderOpen
+  if (/(search|web)/.test(n)) return SearchIcon
+  if (/(sentry|error|monitor)/.test(n)) return Zap
+  if (/(posthog|analytics|graph|chart)/.test(n)) return BarChart3
+  if (/(fs|filesystem|shell|terminal)/.test(n)) return Terminal
+  return Plug
+}
+
+/** Derive a masked auth preview for the UI. Never renders raw secret
+ *  material — a `${VAR}` secret placeholder shows as a label, and real
+ *  values are truncated to a head/tail preview like "abcd…wxyz". */
+function authPreview(server: mcpApi.McpServerConfig): string {
+  const auth = server.auth
+  if (!auth) return ""
+  const value = auth.value ?? ""
+  if (auth.strategy === "oauth2") return auth.state ? "OAuth session" : "Not configured"
+  if (auth.strategy === "basic") return auth.username ? `${auth.username}:••••` : ""
+  if (!value) return ""
+  if (value.startsWith("${") && value.endsWith("}")) return "Secret reference"
+  if (value.length <= 8) return "••••••"
+  return `${value.slice(0, 4)}…${value.slice(-4)}`
+}
+
+
+function buildConnection(name: string, server: mcpApi.McpServerConfig, existing?: McpConnection): McpConnection {
+  const auth = server.auth
+  const authStrategy = auth?.strategy ?? "none"
+  const authConfigured = Boolean(
+    auth && (typeof auth.value === "string" ? auth.value.length > 0 : Boolean(auth.password || auth.state)),
+  )
+  const transport = server.transport
+  const serverType = (transport ? TRANSPORT_TO_TYPE[transport] : undefined) ?? "HTTP"
+  const url = server.url ?? (serverType === "Stdio" && server.command ? `stdio://${server.command}` : "")
+
+  const envVars: EnvVar[] = server.env
+    ? Object.entries(server.env).map(([key, value]) => ({
+        key,
+        value: typeof value === "string" ? value : "",
+        // Every entry in settings.env is a SecretStr; ciphertext or ${VAR}
+        // placeholders are never shown as plaintext.
+        secret: true,
+      }))
+    : []
+
+  // Preserve per-session probe results for servers that already existed.
+  const prev = existing?.id === name ? existing : undefined
+
+  // Merge tool permissions from server config into tool list
+  const toolsWithPermissions = (prev?.tools ?? []).map((tool) => {
+    const permissionOverride = server.tool_permissions?.[tool.name]
+    return {
+      ...tool,
+      permission: permissionOverride ?? tool.permission ?? "allow",
+    }
+  })
+
+  return {
+    id: name,
+    name,
+    description: server.description ?? `${name} MCP server`,
+    connected: true,
+    serverType,
+    url,
+    auth: AUTH_STRATEGY_LABEL[authStrategy] ?? "None",
+    authConfigured,
+    authTokenPreview: authPreview(server),
+    envVars,
+    tools: toolsWithPermissions,
+    category: "Custom",
+    latencyMs: prev?.latencyMs ?? 0,
+    health: prev?.health ?? "unknown",
+    lastUsed: prev?.lastUsed ?? "never",
+    created: prev?.created ?? "",
+    icon: prev?.icon ?? iconForName(name),
+    uptimePercent: 0,
+    lastHealthCheck: prev?.lastHealthCheck ?? "never",
+    errorCount24h: 0,
+    latencyTrend: "stable",
+    totalCalls: 0,
+    calls24h: 0,
+    serverVersion: prev?.serverVersion ?? "",
+    protocolVersion: prev?.protocolVersion ?? "",
+    errorMessage: prev?.errorMessage,
+    eventLog: prev?.eventLog ?? [],
+    history: prev?.history ?? [],
+    config: server as unknown as Record<string, unknown>,
+  }
+}
+
+/** Convert an McpConnection back into a settings.mcp_config server entry. */
+function connectionToConfig(conn: McpConnection): mcpApi.McpServerConfig {
+  const config: mcpApi.McpServerConfig = {
+    description: conn.description,
+  }
+  if (conn.serverType === "Stdio") {
+    config.transport = "stdio"
+    const command = typeof conn.config?.command === "string" ? conn.config.command : conn.url.replace(/^stdio:\/\//, "")
+    if (command) config.command = command
+    const args = conn.config?.args
+    if (Array.isArray(args)) config.args = args as string[]
+  } else {
+    config.transport = conn.serverType === "SSE" ? "sse" : "http"
+    config.url = conn.url
+    const headers = conn.config?.headers
+    if (headers && typeof headers === "object") {
+      config.headers = headers as Record<string, string | null>
+    }
+  }
+  const env: Record<string, string | null> = {}
+  for (const e of conn.envVars) {
+    if (e.key.trim()) env[e.key.trim()] = e.value || null
+  }
+  if (Object.keys(env).length > 0) config.env = env
+
+  const strategy = authStrategyFor(conn.auth)
+  const prevAuth = conn.config?.auth as { strategy?: string; value?: string | null } | null | undefined
+  config.auth = { strategy, value: prevAuth?.value ?? null }
+
+  // Include per-tool permissions if they differ from defaults
+  const toolPermissions: Record<string, "allow" | "deny" | "ask"> = {}
+  for (const tool of conn.tools) {
+    if (tool.permission && tool.permission !== "allow") {
+      toolPermissions[tool.name] = tool.permission
+    }
+  }
+  if (Object.keys(toolPermissions).length > 0) {
+    config.tool_permissions = toolPermissions
+  }
+
+  return config
+}
+
+function authStrategyFor(authLabel: string): string {
+  switch (authLabel) {
+    case "API Key":
+      return "api_key"
+    case "Bearer Token":
+      return "bearer"
+    case "Basic":
+      return "basic"
+    case "Header":
+      return "header"
+    case "OAuth 2.0":
+      return "oauth2"
+    default:
+      return "none"
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Probe helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+function toolsFromProbe(names: string[] | undefined, prev?: McpTool[]): McpTool[] {
+  if (!names) return []
+  return names.map((name) => {
+    const prior = prev?.find((t) => t.name === name)
+    return {
+      name,
+      description: prior?.description ?? "Exposed by the MCP server",
+      enabled: prior?.enabled ?? true,
+      permission: prior?.permission ?? "allow",
+      calls24h: 0,
+    }
+  })
+}
+
+function addEvent(
+  c: McpConnection,
+  title: string,
+  detail: string,
+  status: LogStatus,
+  iconName: string,
+): McpConnection["eventLog"] {
+  return [{ id: `e-${uid()}`, title, detail, time: timeAgo(Date.now()), ts: Date.now(), status, iconName }, ...c.eventLog]
+}
+
+/* ------------------------------------------------------------------ */
+/*  Context                                                            */
+/* ------------------------------------------------------------------ */
+
+export type DataSource = "loading" | "empty" | "backend"
 
 interface McpContextValue {
   connections: McpConnection[]
+  dataSource: DataSource
+  catalog: LibraryServer[]
+  catalogLoading: boolean
   testingId: string | null
   reconnectingId: string | null
   rotatingId: string | null
-  toggleConnection: (id: string) => void
-  testConnection: (id: string) => void
-  testAllConnections: () => void
-  reconnectConnection: (id: string) => void
-  disconnectAll: () => void
-  deleteConnection: (id: string) => void
-  duplicateConnection: (conn: McpConnection) => void
-  upsertConnection: (conn: McpConnection) => void
-  installFromLibrary: (lib: LibraryServer, apiKey: string, envVars: McpConnection["envVars"]) => void
+  load: () => Promise<void>
+  loadCatalog: () => Promise<void>
+  toggleConnection: (id: string) => Promise<void>
+  testConnection: (id: string) => Promise<void>
+  testAllConnections: () => Promise<void>
+  reconnectConnection: (id: string) => Promise<void>
+  disconnectAll: () => Promise<void>
+  deleteConnection: (id: string) => Promise<void>
+  duplicateConnection: (conn: McpConnection) => Promise<void>
+  upsertConnection: (conn: McpConnection) => Promise<void>
+  installFromLibrary: (lib: LibraryServer, apiKey: string, envVars: EnvVar[]) => Promise<void>
   updateTool: (connId: string, toolName: string, patch: Partial<Pick<McpTool, "enabled" | "permission">>) => void
-  saveConfig: (connId: string, patch: Partial<Pick<McpConnection, "envVars" | "authConfigured" | "authTokenPreview">>) => void
-  setApiKey: (id: string, key: string) => void
-  rotateAuth: (id: string) => void
-  revokeAuth: (id: string) => void
+  saveConfig: (connId: string, patch: Partial<Pick<McpConnection, "envVars" | "authConfigured" | "authTokenPreview">>) => Promise<void>
+  setApiKey: (id: string, key: string) => Promise<void>
+  rotateAuth: (id: string) => Promise<void>
+  revokeAuth: (id: string) => Promise<void>
 }
 
 const McpContext = createContext<McpContextValue | null>(null)
 
 export function McpProvider({ children }: { children: ReactNode }) {
-  const [connections, setConnections] = useState<McpConnection[]>(INITIAL_CONNECTIONS)
+  const [connections, setConnections] = useState<McpConnection[]>([])
+  const [dataSource, setDataSource] = useState<DataSource>("loading")
+  const [catalog, setCatalog] = useState<LibraryServer[]>([])
+  const [catalogLoading, setCatalogLoading] = useState(true)
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reconnectingId, setReconnectingId] = useState<string | null>(null)
   const [rotatingId, setRotatingId] = useState<string | null>(null)
 
-  const patchConn = (id: string, fn: (c: McpConnection) => McpConnection) =>
-    setConnections((prev) => prev.map((c) => (c.id === id ? fn(c) : c)))
+  /* ---------------- settings -> connections ---------------- */
 
-  const addEvent = (c: McpConnection, title: string, detail: string, status: LogStatus, iconName: string) => ({
-    id: `e-${uid()}`,
-    title,
-    detail,
-    time: "just now",
-    ts: Date.now(),
-    status,
-    iconName,
-  })
+  const load = useCallback(async () => {
+    try {
+      const settings = await mcpApi.getSettings()
+      const config = settings.agent_settings.mcp_config ?? {}
+      setConnections((prev) => {
+        const prevById = new Map(prev.map((c) => [c.id, c]))
+        return Object.entries(config).map(([name, server]) => buildConnection(name, server, prevById.get(name)))
+      })
+      setDataSource(Object.keys(config).length > 0 ? "backend" : "empty")
+    } catch (error) {
+      console.error("Failed to load MCP connections:", error)
+      setDataSource("empty")
+      toast.error(error instanceof Error ? error.message : "Failed to load MCP servers")
+    }
+  }, [])
 
-  const addHistory = (
-    c: McpConnection,
-    kind: HistoryEvent["kind"],
-    title: string,
-    detail: string,
-  ): HistoryEvent => ({
-    id: `h-${uid()}`,
-    kind,
-    title,
-    detail,
-    time: "just now",
-    ts: Date.now(),
-  })
+  useEffect(() => {
+    void load()
+  }, [load])
 
-  const toggleConnection = (id: string) => {
-    const conn = connections.find((c) => c.id === id)
-    if (!conn) return
-    const next = !conn.connected
-    setConnections((prev) =>
-      prev.map((c) =>
-        c.id === id
-          ? {
-              ...c,
-              connected: next,
-              health: next ? "healthy" : "unknown",
-              lastHealthCheck: next ? "just now" : "never",
-              errorMessage: next ? undefined : c.errorMessage,
-              eventLog: [
-                addEvent(c, next ? "Connection enabled" : "Connection disabled", `${c.name} ${next ? "enabled" : "disabled"} by workspace owner`, next ? "success" : "default", next ? "plug" : "power-off"),
-                ...c.eventLog,
-              ],
-              history: [
-                addHistory(c, next ? "connect" : "disconnect", next ? "Connected" : "Disconnected", next ? "Enabled by workspace owner" : "Disabled by workspace owner"),
-                ...c.history,
-              ],
-            }
-          : c,
-      ),
-    )
-    toast(next ? `${conn.name} enabled` : `${conn.name} disabled`)
-  }
+  /* ---------------- catalog (marketplace) ---------------- */
 
-  const testConnection = (id: string) => {
-    const conn = connections.find((c) => c.id === id)
-    if (!conn) return
-    setTestingId(id)
-    toast.loading(`Testing ${conn.name}...`, { id: `test-${id}` })
-    setTimeout(() => {
-      setTestingId(null)
-      const fail = conn.health === "error" && Math.random() < 0.5
-      const degraded = conn.health === "degraded" && !fail
-      const latency = Math.floor(40 + Math.random() * 200)
-      setConnections((prev) =>
-        prev.map((c) =>
-          c.id === id
-            ? {
-                ...c,
-                latencyMs: latency,
-                latencyTrend: latency > c.latencyMs ? "up" : "down",
-                health: (fail ? "error" : degraded ? "degraded" : "healthy") as Health,
-                lastHealthCheck: "just now",
-                errorCount24h: fail ? c.errorCount24h + 1 : c.errorCount24h,
-                errorMessage: fail
-                  ? "Health check failed — the server did not respond in time. Check the endpoint and credentials."
-                  : degraded
-                    ? c.errorMessage
-                    : undefined,
-                eventLog: [
-                  addEvent(
-                    c,
-                    fail ? "Health check failed" : degraded ? "Health check degraded" : "Health check passed",
-                    fail ? "Request timed out after 30s" : `Response time ${latency}ms`,
-                    fail ? "error" : degraded ? "warning" : "success",
-                    "activity",
-                  ),
-                  ...c.eventLog,
-                ],
-                history: fail
-                  ? [addHistory(c, "error", "Health check failed", "Request timed out after 30s"), ...c.history]
-                  : c.history,
-              }
-            : c,
-        ),
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoading(true)
+    try {
+      const { plugins } = await mcpApi.marketplaceCatalog()
+      setCatalog(
+        plugins.map((p) => ({
+          id: p.name,
+          name: p.name,
+          description: p.description ?? "",
+          serverType: "HTTP",
+          // Real category from the backend catalog (Communication, Development,
+          // Databases, Storage, Productivity) — never local fiction.
+          category: p.category ?? "Custom",
+          url: p.source,
+          // Real auth label advertised by the catalog, e.g. "Google OAuth 2.0".
+          auth: p.authentication ?? "None",
+          tools: p.tools ?? [],
+          icon: iconForName(p.name),
+          source: p.source,
+          ref: p.ref,
+          repo_path: p.repo_path,
+          mcp: p.mcp ?? true,
+        })),
       )
-      if (fail) toast.error(`${conn.name} health check failed`, { id: `test-${id}` })
-      else if (degraded) toast.warning(`${conn.name} responded in ${latency}ms (degraded)`, { id: `test-${id}` })
-      else toast.success(`${conn.name} responded in ${latency}ms`, { id: `test-${id}` })
-    }, 1000)
-  }
+    } catch (error) {
+      console.error("Failed to load marketplace catalog:", error)
+      setCatalog([])
+    } finally {
+      setCatalogLoading(false)
+    }
+  }, [])
 
-  const testAllConnections = () => {
-    const connected = connections.filter((c) => c.connected)
+  useEffect(() => {
+    void loadCatalog()
+  }, [loadCatalog])
+
+  /* ---------------- settings writes ---------------- */
+
+  const patchConfig = useCallback(
+    async (diff: Record<string, mcpApi.McpServerConfig | null>) => {
+      await mcpApi.patchSettings({ agent_settings_diff: { mcp_config: diff } })
+      await load()
+    },
+    [load],
+  )
+
+  const toggleConnection = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      try {
+        if (conn.connected) {
+          await patchConfig({ [id]: null })
+          setConnections((prev) => prev.map((c) => (c.id === id ? { ...c, connected: false, health: "unknown" as Health } : c)))
+          toast.success(`${conn.name} disconnected`)
+        } else {
+          await patchConfig({ [id]: connectionToConfig(conn) })
+          setConnections((prev) => prev.map((c) => (c.id === id ? { ...c, connected: true } : c)))
+          toast.success(`${conn.name} reconnected`)
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to update connection")
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  const deleteConnection = useCallback(
+    async (id: string) => {
+      try {
+        await patchConfig({ [id]: null })
+        setConnections((prev) => prev.filter((c) => c.id !== id))
+        toast.success("Connection removed")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to remove connection")
+      }
+    },
+    [patchConfig],
+  )
+
+  const disconnectAll = useCallback(async () => {
+    const toRemove = connections.filter((c) => c.connected).map((c) => c.id)
+    if (toRemove.length === 0) return
+    try {
+      const diff: Record<string, mcpApi.McpServerConfig | null> = {}
+      for (const id of toRemove) diff[id] = null
+      await patchConfig(diff)
+      setConnections((prev) => prev.map((c) => (c.connected ? { ...c, connected: false, health: "unknown" as Health } : c)))
+      toast.success("All servers disconnected")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to disconnect servers")
+    }
+  }, [connections, patchConfig])
+
+  const duplicateConnection = useCallback(
+    async (conn: McpConnection) => {
+      try {
+        const copy = { ...conn, name: `${conn.name} (Copy)` }
+        await patchConfig({ [copy.name]: connectionToConfig(copy) })
+        toast.success(`Duplicated "${conn.name}"`)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to duplicate connection")
+      }
+    },
+    [patchConfig],
+  )
+
+  const upsertConnection = useCallback(
+    async (conn: McpConnection) => {
+      const name = conn.name.trim()
+      if (!name) {
+        toast.error("Server name is required")
+        return
+      }
+      try {
+        await patchConfig({ [name]: connectionToConfig(conn) })
+        toast.success(conn.connected ? `${name} connected` : `${name} saved`)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save connection")
+      }
+    },
+    [patchConfig],
+  )
+
+  /* ---------------- install ---------------- */
+
+  const installFromLibrary = useCallback(
+    async (lib: LibraryServer, apiKey: string, envVars: EnvVar[]) => {
+      try {
+        if (lib.source) {
+          await mcpApi.installPlugin(lib.source, lib.ref ?? undefined, lib.repo_path ?? undefined)
+        }
+        // Store any entered credentials as secrets so ${VAR} placeholders in
+        // the plugin's .mcp.json resolve at conversation build time.
+        const secretCandidates: { key: string; value: string }[] = []
+        for (const v of envVars) {
+          if (v.key.trim() && v.value) secretCandidates.push({ key: v.key.trim(), value: v.value })
+        }
+        if (apiKey) {
+          const key = `${lib.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_ACCESS_TOKEN`
+          if (!secretCandidates.some((s) => s.key === key)) secretCandidates.push({ key, value: apiKey })
+        }
+        for (const s of secretCandidates) {
+          try {
+            await mcpApi.setSecret(s.key, s.value)
+          } catch (error) {
+            console.warn(`Failed to store secret ${s.key}:`, error)
+          }
+        }
+        await loadCatalog()
+        toast.success(`${lib.name} installed`, { description: "MCP servers from the plugin activate on the next conversation" })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : `Failed to install ${lib.name}`)
+      }
+    },
+    [loadCatalog],
+  )
+
+  /* ---------------- probe / test ---------------- */
+
+  const applyProbe = useCallback((conn: McpConnection, spec: mcpApi.McpTestServerSpec, id: string) => {
+    setTestingId(id)
+    const toastId = `test-${id}`
+    toast.loading(`Testing ${conn.name}...`, { id: toastId })
+    mcpApi
+      .testServer({ name: conn.name, server: spec })
+      .then((result) => {
+        setConnections((prev) =>
+          prev.map((c) =>
+            c.id === id
+              ? result.ok
+                ? {
+                    ...c,
+                    health: "healthy" as Health,
+                    lastHealthCheck: "just now",
+                    errorMessage: undefined,
+                    tools: toolsFromProbe(result.tools, c.tools),
+                    eventLog: addEvent(c, "Connection test passed", `Discovered ${result.tools.length} tool(s)`, "success", "activity"),
+                    history: [
+                      { id: `h-${uid()}`, kind: "connect" as const, title: "Connected", detail: "Probe succeeded", time: "just now", ts: Date.now() },
+                      ...c.history,
+                    ],
+                  }
+                : {
+                    ...c,
+                    health: "error" as Health,
+                    lastHealthCheck: "just now",
+                    errorMessage: result.error,
+                    eventLog: addEvent(c, "Connection test failed", result.error, "error", "wifi-off"),
+                  }
+              : c,
+          ),
+        )
+        if (result.ok) toast.success(`${conn.name} responded — ${result.tools.length} tools`, { id: toastId })
+        else toast.error(`${conn.name} failed: ${result.error}`, { id: toastId })
+      })
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : "Connection test failed", { id: toastId })
+      })
+      .finally(() => setTestingId(null))
+  }, [])
+
+  const testConnection = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      const spec = mcpApi.buildTestServerSpec(conn)
+      if (!spec) {
+        toast.error("Cannot build a probe from this configuration")
+        return
+      }
+      applyProbe(conn, spec, id)
+    },
+    [connections],
+  )
+
+  const testAllConnections = useCallback(async () => {
+    const connected = connections.filter((c) => c.connected && c.url)
     if (connected.length === 0) {
       toast.error("No connected servers to test")
       return
     }
     toast.loading(`Testing ${connected.length} servers...`, { id: "test-all" })
-    setTimeout(() => {
-      setConnections((prev) =>
-        prev.map((c) =>
-          c.connected
-            ? { ...c, latencyMs: Math.floor(40 + Math.random() * 200), lastHealthCheck: "just now", latencyTrend: "stable" as const }
-            : c,
-        ),
-      )
-      toast.success(`All ${connected.length} servers responded`, { id: "test-all" })
-    }, 1500)
-  }
-
-  const reconnectConnection = (id: string) => {
-    const conn = connections.find((c) => c.id === id)
-    if (!conn) return
-    setReconnectingId(id)
-    toast.loading(`Reconnecting ${conn.name}...`, { id: `reconnect-${id}` })
-    setTimeout(() => {
-      setReconnectingId(null)
-      setConnections((prev) =>
-        prev.map((c) =>
-          c.id === id
-            ? {
-                ...c,
-                connected: true,
-                health: "healthy",
-                lastHealthCheck: "just now",
-                errorMessage: undefined,
-                eventLog: [addEvent(c, "Connection re-established", "Handshake completed", "success", "plug"), ...c.eventLog],
-                history: [addHistory(c, "reconnect", "Reconnected", "Handshake completed"), ...c.history],
-              }
-            : c,
-        ),
-      )
-      toast.success(`${conn.name} reconnected`, { id: `reconnect-${id}` })
-    }, 1200)
-  }
-
-  const disconnectAll = () => {
-    setConnections((prev) =>
-      prev.map((c) =>
-        c.connected
-          ? {
-              ...c,
-              connected: false,
-              health: "unknown",
-              lastHealthCheck: "never",
-              errorMessage: undefined,
-              eventLog: [addEvent(c, "Connection disabled", "Bulk disconnect by workspace owner", "default", "power-off"), ...c.eventLog],
-              history: [addHistory(c, "disconnect", "Disconnected", "Bulk disconnect"), ...c.history],
-            }
-          : c,
-      ),
-    )
-    toast.success("All servers disconnected")
-  }
-
-  const deleteConnection = (id: string) => {
-    setConnections((prev) => prev.filter((c) => c.id !== id))
-    toast.success("Connection removed")
-  }
-
-  const duplicateConnection = (conn: McpConnection) => {
-    const clone: McpConnection = {
-      ...conn,
-      id: `mcp-${uid()}`,
-      name: `${conn.name} (Copy)`,
-      connected: false,
-      health: "unknown",
-      lastUsed: "never",
-      created: todayLabel(),
-      uptimePercent: 0,
-      lastHealthCheck: "never",
-      errorCount24h: 0,
-      totalCalls: 0,
-      calls24h: 0,
-      eventLog: [],
-      history: [addHistory(conn, "connect", "Created", "Duplicated from an existing connection")],
-    }
-    setConnections((prev) => [clone, ...prev])
-    toast.success(`Duplicated "${conn.name}"`)
-  }
-
-  const upsertConnection = (conn: McpConnection) => {
-    setConnections((prev) => {
-      const exists = prev.some((c) => c.id === conn.id)
-      return exists ? prev.map((c) => (c.id === conn.id ? conn : c)) : [conn, ...prev]
-    })
-  }
-
-  const installFromLibrary = (lib: LibraryServer, apiKey: string, envVars: McpConnection["envVars"]) => {
-    const tools: McpTool[] = lib.tools.map((t) => ({
-      name: t,
-      description: `Exposed by ${lib.name}`,
-      enabled: true,
-      permission: "allow",
-      calls24h: 0,
-    }))
-    const finalEnvVars = apiKey
-      ? [
-          ...envVars,
-          {
-            key: `${lib.name.toUpperCase().replace(/\s+/g, "_")}_ACCESS_TOKEN`,
-            value: `${apiKey.slice(0, 4)}••••${apiKey.slice(-4)}`,
-            secret: true,
-          },
-        ]
-      : envVars
-    const installed: McpConnection = {
-      id: `mcp-${lib.id}-${Date.now()}`,
-      name: lib.name,
-      description: lib.description,
-      connected: true,
-      serverType: lib.serverType,
-      url: lib.url,
-      auth: lib.auth,
-      authConfigured: apiKey !== "",
-      authTokenPreview: apiKey ? `${apiKey.slice(0, 4)}••••••••${apiKey.slice(-4)}` : undefined,
-      envVars: finalEnvVars,
-      tools,
-      category: lib.category,
-      latencyMs: Math.floor(40 + Math.random() * 160),
-      health: "healthy",
-      lastUsed: "just now",
-      created: todayLabel(),
-      icon: lib.icon,
-      uptimePercent: 100,
-      lastHealthCheck: "just now",
-      errorCount24h: 0,
-      latencyTrend: "stable",
-      totalCalls: 0,
-      calls24h: 0,
-      serverVersion: "1.0.0",
-      protocolVersion: "2025-03-26",
-      eventLog: [],
-      history: [],
-    }
-    installed.eventLog = [addEvent(installed, "Connection established", `${lib.name} MCP server connected`, "success", "plug")]
-    installed.history = [addHistory(installed, "connect", "Connected", "Installed from library")]
-    upsertConnection(installed)
-    toast.success(`${lib.name} installed`, { description: `${tools.length} tools now available` })
-  }
-
-  const updateTool = (connId: string, toolName: string, patch: Partial<Pick<McpTool, "enabled" | "permission">>) => {
-    patchConn(connId, (c) => ({ ...c, tools: c.tools.map((t) => (t.name === toolName ? { ...t, ...patch } : t)) }))
-  }
-
-  const saveConfig = (connId: string, patch: Partial<Pick<McpConnection, "envVars" | "authConfigured" | "authTokenPreview">>) => {
-    patchConn(connId, (c) => ({ ...c, ...patch }))
-  }
-
-  const setApiKey = (id: string, key: string) => {
-    patchConn(id, (c) => ({
-      ...c,
-      authConfigured: true,
-      authTokenPreview: `${key.slice(0, 4)}••••••••${key.slice(-4)}`,
-      eventLog: [addEvent(c, "Credential saved", "New API key stored in the vault", "success", "auth"), ...c.eventLog],
-      history: [addHistory(c, "auth", "Credential updated", "New API key configured"), ...c.history],
-    }))
-    toast.success("Credential saved")
-  }
-
-  const rotateAuth = (id: string) => {
-    const conn = connections.find((c) => c.id === id)
-    if (!conn) return
-    setRotatingId(id)
-    toast.loading("Rotating token...", { id: `rotate-${id}` })
-    setTimeout(() => {
-      setRotatingId(null)
-      const previews: Record<string, string> = {
-        // Masked demo previews — no real credential prefixes so secret
-        // scanners never flag the repo.
-        "OAuth 2.0": "••••••••••••••••4q7x",
-        "API Key": "••••••••••••••••9z2m",
-        "Bearer Token": "••••••••••••••••••",
+    for (const conn of connected) {
+      const spec = mcpApi.buildTestServerSpec(conn)
+      if (spec) {
+        const result = await mcpApi.testServer({ name: conn.name, server: spec })
+        setConnections((prev) =>
+          prev.map((c) =>
+            c.id === conn.id
+              ? result.ok
+                ? {
+                    ...c,
+                    health: "healthy" as Health,
+                    lastHealthCheck: "just now",
+                    errorMessage: undefined,
+                    tools: toolsFromProbe(result.tools, c.tools),
+                  }
+                : { ...c, health: "error" as Health, lastHealthCheck: "just now", errorMessage: result.error }
+              : c,
+          ),
+        )
       }
+    }
+    toast.success(`All ${connected.length} servers tested`, { id: "test-all" })
+  }, [connections])
+
+  const reconnectConnection = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      const spec = mcpApi.buildTestServerSpec(conn)
+      if (!spec) {
+        toast.error("Cannot build a probe from this configuration")
+        return
+      }
+      setReconnectingId(id)
+      const toastId = `reconnect-${id}`
+      toast.loading(`Reconnecting ${conn.name}...`, { id: toastId })
+      try {
+        const result = await mcpApi.testServer({ name: conn.name, server: spec })
+        if (result.ok) {
+          // Reconnect = probe + ensure the server is present in the persisted config.
+          if (!conn.connected) await patchConfig({ [id]: connectionToConfig(conn) })
+          setConnections((prev) =>
+            prev.map((c) =>
+              c.id === id
+                ? {
+                    ...c,
+                    connected: true,
+                    health: "healthy" as Health,
+                    lastHealthCheck: "just now",
+                    errorMessage: undefined,
+                    tools: toolsFromProbe(result.tools, c.tools),
+                    eventLog: addEvent(c, "Connection re-established", `Discovered ${result.tools.length} tool(s)`, "success", "plug"),
+                  }
+                : c,
+            ),
+          )
+          toast.success(`${conn.name} reconnected`, { id: toastId })
+        } else {
+          setConnections((prev) =>
+            prev.map((c) =>
+              c.id === id
+                ? { ...c, health: "error" as Health, lastHealthCheck: "just now", errorMessage: result.error }
+                : c,
+            ),
+          )
+          toast.error(`${conn.name} failed: ${result.error}`, { id: toastId })
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Reconnect failed", { id: toastId })
+      } finally {
+        setReconnectingId(null)
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  /* ---------------- config / auth ---------------- */
+
+  const saveConfig = useCallback(
+    async (connId: string, patch: Partial<Pick<McpConnection, "envVars" | "authConfigured" | "authTokenPreview">>) => {
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return
+      const env: Record<string, string | null> = {}
+      for (const e of patch.envVars ?? conn.envVars) {
+        if (e.key.trim()) env[e.key.trim()] = e.value || null
+      }
+      const server: mcpApi.McpServerConfig = {
+        ...(conn.config as mcpApi.McpServerConfig | undefined),
+        env: Object.keys(env).length > 0 ? env : undefined,
+      }
+      if (patch.authConfigured !== undefined && server.auth) {
+        server.auth = { ...server.auth, value: patch.authConfigured ? server.auth.value ?? null : null }
+      }
+      try {
+        await patchConfig({ [connId]: server })
+        toast.success(`${conn.name} configuration saved`)
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save configuration")
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  const setApiKey = useCallback(
+    async (id: string, key: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      const strategy = authStrategyFor(conn.auth)
+      try {
+        await patchConfig({ [id]: { ...(conn.config as mcpApi.McpServerConfig), auth: { strategy, value: key } } })
+        toast.success("Credential saved")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save credential")
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  const rotateAuth = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      setRotatingId(id)
+      try {
+        const strategy = authStrategyFor(conn.auth)
+        await patchConfig({ [id]: { ...(conn.config as mcpApi.McpServerConfig), auth: { strategy, value: null } } })
+        toast.success("Credential cleared — enter a new value to rotate", { description: "For OAuth servers use the OAuth flow (Phase 8)." })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to rotate credential")
+      } finally {
+        setRotatingId(null)
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  const revokeAuth = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      try {
+        const strategy = authStrategyFor(conn.auth)
+        await patchConfig({ [id]: { ...(conn.config as mcpApi.McpServerConfig), auth: { strategy, value: null } } })
+        toast.success("Credential revoked")
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to revoke credential")
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  /* ---------------- tools ---------------- */
+
+  const updateTool = useCallback(
+    async (connId: string, toolName: string, patch: Partial<Pick<McpTool, "enabled" | "permission">>) => {
+      // Optimistically update local state
       setConnections((prev) =>
         prev.map((c) =>
-          c.id === id
-            ? {
-                ...c,
-                authConfigured: true,
-                authTokenPreview: previews[c.auth] ?? c.authTokenPreview,
-                eventLog: [addEvent(c, "Token rotated", "A new credential was issued", "success", "auth"), ...c.eventLog],
-                history: [addHistory(c, "auth", "Token rotated", "Old credential invalidated"), ...c.history],
-              }
+          c.id === connId
+            ? { ...c, tools: c.tools.map((t) => (t.name === toolName ? { ...t, ...patch } : t)) }
             : c,
         ),
       )
-      toast.success("Token rotated successfully", { id: `rotate-${id}` })
-    }, 1200)
-  }
 
-  const revokeAuth = (id: string) => {
-    const conn = connections.find((c) => c.id === id)
-    if (!conn) return
-    setConnections((prev) =>
-      prev.map((c) =>
-        c.id === id
-          ? {
-              ...c,
-              authConfigured: false,
-              authTokenPreview: undefined,
-              eventLog: [addEvent(c, "Credential revoked", "The stored token was invalidated", "warning", "auth"), ...c.eventLog],
-              history: [addHistory(c, "auth", "Credential revoked", "Stored token invalidated"), ...c.history],
-            }
-          : c,
-      ),
-    )
-    toast.success("Credential revoked")
-  }
+      // Persist to backend settings
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return
+
+      // Build the full tool_permissions map for this connection
+      const toolPermissions: Record<string, "allow" | "deny" | "ask"> = {}
+      for (const tool of conn.tools) {
+        const permission = tool.name === toolName ? patch.permission ?? tool.permission : tool.permission
+        if (permission && permission !== "allow") {
+          toolPermissions[tool.name] = permission
+        }
+      }
+
+      const server: mcpApi.McpServerConfig = {
+        ...(conn.config as mcpApi.McpServerConfig | undefined),
+        tool_permissions: Object.keys(toolPermissions).length > 0 ? toolPermissions : undefined,
+      }
+
+      try {
+        await patchConfig({ [connId]: server })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save tool permission")
+        // Revert on error - reload from backend
+        await load()
+      }
+    },
+    [connections, patchConfig, load],
+  )
 
   const value = useMemo<McpContextValue>(
     () => ({
       connections,
+      dataSource,
+      catalog,
+      catalogLoading,
       testingId,
       reconnectingId,
       rotatingId,
+      load,
+      loadCatalog,
       toggleConnection,
       testConnection,
       testAllConnections,
@@ -388,8 +745,31 @@ export function McpProvider({ children }: { children: ReactNode }) {
       rotateAuth,
       revokeAuth,
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [connections, testingId, reconnectingId, rotatingId],
+    [
+      connections,
+      dataSource,
+      catalog,
+      catalogLoading,
+      testingId,
+      reconnectingId,
+      rotatingId,
+      load,
+      loadCatalog,
+      toggleConnection,
+      testConnection,
+      testAllConnections,
+      reconnectConnection,
+      disconnectAll,
+      deleteConnection,
+      duplicateConnection,
+      upsertConnection,
+      installFromLibrary,
+      updateTool,
+      saveConfig,
+      setApiKey,
+      rotateAuth,
+      revokeAuth,
+    ],
   )
 
   return <McpContext.Provider value={value}>{children}</McpContext.Provider>

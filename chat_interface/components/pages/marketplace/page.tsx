@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useMemo, useState } from "react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -24,7 +24,6 @@ import {
 import { McpConnectionDialog, McpInstallDialog } from "@/components/pages/mcp/mcp-dialogs"
 import { SkillActivateDialog } from "./skill-activate-dialog"
 import { SKILL_TEMPLATES } from "@/components/pages/skills/skill-data"
-import { LIBRARY } from "@/components/pages/mcp/mcp-data"
 import type { LibraryServer } from "@/components/pages/mcp/mcp-types"
 import type { SkillPermissionFlags, SkillTemplate } from "@/components/pages/skills/skill-types"
 import { cn } from "@/lib/utils"
@@ -306,6 +305,7 @@ function SkillsSection({
 /* ------------------------------------------------------------------ */
 
 function McpSection({
+  catalog,
   query,
   onQueryChange,
   category,
@@ -315,6 +315,7 @@ function McpSection({
   onAddCustom,
   loading,
 }: {
+  catalog: LibraryServer[]
   query: string
   onQueryChange: (v: string) => void
   category: string
@@ -325,29 +326,29 @@ function McpSection({
   loading: boolean
 }) {
   const categories = useMemo(
-    () => ["All", ...Array.from(new Set(LIBRARY.map((l) => l.category)))],
-    [],
+    () => ["All", ...Array.from(new Set(catalog.map((l) => l.category)))],
+    [catalog],
   )
   const counts = useMemo(() => {
-    const map: Record<string, number> = { All: LIBRARY.length }
-    for (const l of LIBRARY) map[l.category] = (map[l.category] ?? 0) + 1
+    const map: Record<string, number> = { All: catalog.length }
+    for (const l of catalog) map[l.category] = (map[l.category] ?? 0) + 1
     return map
-  }, [])
+  }, [catalog])
 
   const q = query.trim().toLowerCase()
   const filtered = useMemo(
     () =>
-      LIBRARY.filter((l) => {
+      catalog.filter((l) => {
         const matchesCategory = category === "All" || l.category === category
         const matchesQuery = !q || l.name.toLowerCase().includes(q) || l.description.toLowerCase().includes(q)
         return matchesCategory && matchesQuery
       }),
-    [q, category],
+    [q, category, catalog],
   )
 
   const installedItems = useMemo(
-    () => LIBRARY.filter((l) => installedNames.has(l.name.toLowerCase())),
-    [installedNames],
+    () => catalog.filter((l) => installedNames.has(l.name.toLowerCase())),
+    [installedNames, catalog],
   )
 
   return (
@@ -421,7 +422,7 @@ const SIDEBAR_NAV = [
 export function MarketplaceDashboard() {
   const { marketplaceSection, setMarketplaceSection, marketplaceOrigin, setView } = useNavigation()
   const { skills, installTemplate } = useSkills()
-  const { connections, installFromLibrary, upsertConnection } = useMcp()
+  const { connections, catalog, catalogLoading, installFromLibrary, upsertConnection } = useMcp()
 
   const [skillQuery, setSkillQuery] = useState("")
   const [skillCategory, setSkillCategory] = useState("All")
@@ -430,12 +431,6 @@ export function MarketplaceDashboard() {
   const [installTarget, setInstallTarget] = useState<LibraryServer | null>(null)
   const [customOpen, setCustomOpen] = useState(false)
   const [activateTarget, setActivateTarget] = useState<SkillTemplate | null>(null)
-  const [loaded, setLoaded] = useState(false)
-
-  useEffect(() => {
-    const t = setTimeout(() => setLoaded(true), 350)
-    return () => clearTimeout(t)
-  }, [])
 
   const installedSkillNames = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills])
   const installedServerNames = useMemo(() => new Set(connections.map((c) => c.name.toLowerCase())), [connections])
@@ -448,7 +443,7 @@ export function MarketplaceDashboard() {
     installTemplate(tpl, { flags })
   }
   const installMcp = (id: string) => {
-    const lib = LIBRARY.find((l) => l.id === id)
+    const lib = catalog.find((l) => l.id === id)
     if (lib) setInstallTarget(lib)
   }
 
@@ -481,7 +476,7 @@ export function MarketplaceDashboard() {
           <nav className="space-y-0.5">
             {SIDEBAR_NAV.map(({ key, label, icon: Icon }) => {
               const active = marketplaceSection === key
-              const count = key === "skills" ? SKILL_TEMPLATES.length : key === "mcp" ? LIBRARY.length : undefined
+              const count = key === "skills" ? SKILL_TEMPLATES.length : key === "mcp" ? catalog.length : undefined
               return (
                 <button
                   key={key}
@@ -532,7 +527,7 @@ export function MarketplaceDashboard() {
               {marketplaceSection === "home" && (
                 <WelcomeSection
                   skillCount={SKILL_TEMPLATES.length}
-                  mcpCount={LIBRARY.length}
+                  mcpCount={catalog.length}
                   installedSkills={skills.length}
                   installedServers={connections.length}
                   onBrowse={setMarketplaceSection}
@@ -546,11 +541,12 @@ export function MarketplaceDashboard() {
                   onCategoryChange={setSkillCategory}
                   installedNames={installedSkillNames}
                   onInstall={installSkill}
-                  loading={!loaded}
+                  loading={false}
                 />
               )}
               {marketplaceSection === "mcp" && (
                 <McpSection
+                  catalog={catalog}
                   query={mcpQuery}
                   onQueryChange={setMcpQuery}
                   category={mcpCategory}
@@ -558,7 +554,7 @@ export function MarketplaceDashboard() {
                   installedNames={installedServerNames}
                   onInstall={installMcp}
                   onAddCustom={() => setCustomOpen(true)}
-                  loading={!loaded}
+                  loading={catalogLoading}
                 />
               )}
             </div>

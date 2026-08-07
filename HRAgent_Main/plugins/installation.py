@@ -176,7 +176,9 @@ class InstallationManager(Generic[T]):
         name = getattr(payload, "name", None) or source_dir.name
         existing = self._read_metadata(name)
         if existing is not None and not force:
-            raise ValueError(
+            # FileExistsError (not ValueError) so both routers map this to a 409
+            # "already installed" and the skills bulk-install catch fires.
+            raise FileExistsError(
                 f"Extension {name!r} is already installed; pass force=True to overwrite."
             )
 
