@@ -13,5 +13,33 @@
     "get_files",
     "search_files"
   ],
-  "mcp": true
+  "mcp": true,
+  "setup": {
+    "auth": {
+      "method": "env",
+      "label": "Microsoft Entra ID (OAuth)",
+      "hint": "The M365 server performs its own MSAL OAuth using these Azure app credentials."
+    },
+    "fields": [
+      {
+        "name": "MS365_MCP_CLIENT_ID",
+        "label": "Azure App Client ID",
+        "type": "text",
+        "required": true
+      },
+      {
+        "name": "MS365_MCP_CLIENT_SECRET",
+        "label": "Azure App Client Secret",
+        "type": "password",
+        "secret": true,
+        "required": true
+      },
+      {
+        "name": "MS365_MCP_TENANT_ID",
+        "label": "Azure Tenant ID",
+        "type": "text",
+        "required": true
+      }
+    ]
+  }
 }

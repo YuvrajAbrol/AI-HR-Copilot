@@ -157,7 +157,23 @@ let sawAgentTextThisTurn = false
 // deltas, if any. Null when we are not mid-stream. Reset each turn.
 let streamingMessageId: string | null = null
 
-const TERMINAL_STATUSES = new Set(['finished', 'error', 'stuck'])
+// Live text-generation step in the activity feed. When the agent answers with
+// plain text (no tool call to render), the feed would otherwise stay empty for
+// the whole turn; we keep one "responding…" step that is born on the first
+// streamed token and closes when the run reaches a terminal state.
+let respondingStepId: string | null = null
+let respondTextBuffer = ''
+let respondLastPaintedAt = 0
+
+// A turn is terminal when the backend stops producing for it. Besides the
+// explicit failures, a user-initiated interrupt lands here too: the backend
+// reports `paused` (and may later resume on the next message). Without these,
+// the activity feed's running steps and the streamed bubble would never be
+// finalized after a Stop, leaving the sidebar stuck on "running".
+const TERMINAL_STATUSES = new Set(['finished', 'error', 'stuck', 'paused', 'interrupted', 'stopped'])
+// Statuses that represent a user-cancelled turn rather than a failure: closing
+// steps as errors would mislead the activity feed.
+const USER_CANCEL_STATUSES = new Set(['paused', 'interrupted', 'stopped'])
 
 // hr-mcp tools that read structured data (Azure SQL later) vs. policy RAG.
 const DATA_TOOLS = new Set(['employee_lookup', 'pto_balance', 'org_chart', 'benefits_lookup'])
@@ -372,6 +388,11 @@ export const useChat = create<ChatState>((set, get) => ({
   sendMessage: async (content: string) => {
     const trimmed = content.trim()
     if (!trimmed) return
+    // One turn at a time: never queue a new prompt while the previous agent run
+    // is still in flight. The composer shows a Stop button while running, so
+    // the user can interrupt instead. Guarding here (not just in the UI) makes
+    // the rule hold for every caller and is the single source of truth.
+    if (get().isRunning) return
 
     const now = new Date()
     const userMessage: Message = {
@@ -413,6 +434,7 @@ export const useChat = create<ChatState>((set, get) => ({
 
     sawAgentTextThisTurn = false
     streamingMessageId = null
+    resetRespondingStep()
 
     try {
       const socket = await ensureSocket(get, set)
@@ -444,6 +466,7 @@ export const useChat = create<ChatState>((set, get) => ({
 
   clearConversation: () => {
     streamingMessageId = null
+    resetRespondingStep()
     useCanvas.getState().clear()
     set({ activeConversation: [], error: null, activity: [], activityStartedAt: null })
   },
@@ -470,6 +493,7 @@ export const useChat = create<ChatState>((set, get) => ({
     const { activeId, activeConversation } = get()
     resetConnection(get, set)
     streamingMessageId = null
+    resetRespondingStep()
     useCanvas.getState().clear()
     const id = `chat-${Date.now()}`
     set((state) => {
@@ -493,6 +517,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (id === activeId) return
     resetConnection(get, set)
     streamingMessageId = null
+    resetRespondingStep()
     useCanvas.getState().clear()
     set((state) => {
       const messagesByChat = { ...state.messagesByChat }
@@ -519,6 +544,7 @@ export const useChat = create<ChatState>((set, get) => ({
     if (isActive) {
       resetConnection(get, set)
       streamingMessageId = null
+      resetRespondingStep()
       useCanvas.getState().clear()
     }
     set((state) => {
@@ -599,6 +625,54 @@ function markRunningStepsError(set: Setter, detail: string) {
       s.status === 'running' ? { ...s, status: 'error' as EventStatus, endedAtMs: now, detail } : s,
     ),
   }))
+}
+
+// --- Live text-generation step (activity feed) ------------------------------
+// Surfaces the agent's plain-text answer as it streams, so the feed reflects
+// what the agent is doing even when it never calls a tool. The step is created
+// on the first streamed token and closed by finishTurn / the error handlers.
+
+function ensureRespondingStep(set: Setter) {
+  if (respondingStepId) return
+  const id = newId('resp')
+  respondingStepId = id
+  pushActivity(set, {
+    id,
+    category: 'step',
+    title: 'Responding…',
+    status: 'running',
+    createdAtMs: Date.now(),
+  })
+}
+
+function paintRespondingStep(set: Setter) {
+  if (!respondingStepId) return
+  const title = truncate(respondTextBuffer, 60) || 'Responding…'
+  set((state) => {
+    let changed = false
+    const activity = state.activity.map((s) => {
+      if (!changed && s.id === respondingStepId && s.status === 'running' && s.title !== title) {
+        changed = true
+        return { ...s, title }
+      }
+      return s
+    })
+    return changed ? { activity } : {}
+  })
+}
+
+// Throttle step-title repaints to a few per second (deltas arrive per token).
+function maybePaintRespondingStep(set: Setter) {
+  const now = Date.now()
+  if (now - respondLastPaintedAt < 120) return
+  respondLastPaintedAt = now
+  paintRespondingStep(set)
+}
+
+function resetRespondingStep() {
+  respondingStepId = null
+  respondTextBuffer = ''
+  respondLastPaintedAt = 0
 }
 
 // Append a streamed token chunk to the in-progress assistant bubble, creating
@@ -828,10 +902,15 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
 
   // A live token delta for the current answer (only emitted when the backend
   // LLM is configured with stream=true). Builds the assistant bubble
-  // incrementally; the trailing MessageEvent finalizes it.
+  // incrementally; the trailing MessageEvent finalizes it. Also mirrors the
+  // stream onto a live "responding…" activity step so the sidebar reflects the
+  // agent's plain-text work in real time, not just its tool calls.
   if (kind === 'StreamingDeltaEvent') {
     if (typeof evt.content === 'string' && evt.content.length > 0) {
+      respondTextBuffer = (respondTextBuffer + evt.content).slice(-4000)
       appendStreamingDelta(set, evt.content)
+      ensureRespondingStep(set)
+      maybePaintRespondingStep(set)
     }
     return
   }
@@ -954,10 +1033,18 @@ function handleServerEvent(evt: any, get: Getter, set: Setter) {
 
 function finishTurn(status: string, get: Getter, set: Setter) {
   set({ isRunning: false })
+  resetRespondingStep()
 
   // Close out any steps still marked running so the feed doesn't spin forever,
-  // and commit any partially streamed answer.
-  const stepStatus: EventStatus = status === 'finished' ? 'success' : 'error'
+  // and commit any partially streamed answer. A user-initiated stop is not a
+  // failure: close those steps as "warn" so the feed reads as cancelled, not
+  // broken, and don't fetch the final response for it.
+  let stepStatus: EventStatus = status === 'finished' ? 'success' : 'error'
+  let cancelled = false
+  if (USER_CANCEL_STATUSES.has(status)) {
+    stepStatus = 'warn'
+    cancelled = true
+  }
   const now = Date.now()
   set((state) => ({
     activity: state.activity.map((s) =>
@@ -968,6 +1055,10 @@ function finishTurn(status: string, get: Getter, set: Setter) {
 
   if (status === 'error' || status === 'stuck') {
     appendSystem(set, `The agent stopped (${status}).`)
+    return
+  }
+  if (cancelled) {
+    appendSystem(set, 'The run was stopped.')
     return
   }
 

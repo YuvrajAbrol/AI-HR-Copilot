@@ -15,6 +15,7 @@ import {
   Loader2,
   WifiOff,
   SearchX,
+  KeyRound,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,6 +35,7 @@ import {
 } from "@/components/management/shared"
 import { McpDetailPanel } from "./mcp-detail"
 import { McpConnectionDialog } from "./mcp-dialogs"
+import { McpSetupDialog } from "./mcp-setup-dialog"
 import type { McpConnection } from "./mcp-types"
 import { useMcp } from "@/lib/mcp-store"
 import { useNavigation } from "@/lib/navigation"
@@ -44,6 +46,7 @@ export function McpConnectionsPage() {
   const {
     connections,
     dataSource,
+    catalog,
     testingId,
     reconnectingId,
     rotatingId,
@@ -70,6 +73,7 @@ export function McpConnectionsPage() {
   const [editing, setEditing] = useState<McpConnection | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<McpConnection | null>(null)
   const [disconnectAllOpen, setDisconnectAllOpen] = useState(false)
+  const [setupConnId, setSetupConnId] = useState<string | null>(null)
 
   // Skeleton shows only while the backend load is genuinely in flight —
   // never a fixed timer. Once dataSource leaves "loading", render whatever
@@ -100,6 +104,23 @@ export function McpConnectionsPage() {
   const openEdit = (conn: McpConnection) => {
     setEditing(conn)
     setCreateOpen(true)
+  }
+
+  // Setup drives the integration's credential schema (token/OAuth/env) against
+  // its marketplace template. Custom servers have no schema — fall back to the
+  // full Edit dialog for those.
+  //
+  // A connection's id is a server-template name, so the owning library is the
+  // catalog entry that provides that server (matched by id first — plugin name
+  // equals its template key for every current integration — then by which
+  // library's templates contain the server, which survives multi-server libs).
+  const setupConn = setupConnId ? (connections.find((c) => c.id === setupConnId) ?? null) : null
+  const findSetupLib = (connId: string) =>
+    catalog.find((l) => l.id === connId) ?? catalog.find((l) => l.servers && connId in l.servers)
+  const setupLib = setupConnId ? (findSetupLib(setupConnId) ?? null) : null
+  const openSetup = (conn: McpConnection) => {
+    if (findSetupLib(conn.id)) setSetupConnId(conn.id)
+    else openEdit(conn)
   }
 
   return (
@@ -196,6 +217,19 @@ export function McpConnectionsPage() {
               enabled={c.connected}
               onToggle={() => toggleConnection(c.id)}
               onOpen={() => setDetailId(c.id)}
+              toggle={
+                c.setupNeeded ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => openSetup(c)}
+                    className="h-8 gap-2 border border-amber-500/25 bg-amber-500/10 text-[13px] text-amber-300 hover:bg-amber-500/15 hover:text-amber-200"
+                  >
+                    <KeyRound className="h-3.5 w-3.5" />
+                    Setup
+                  </Button>
+                ) : undefined
+              }
               menu={
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -221,6 +255,12 @@ export function McpConnectionsPage() {
                       {reconnectingId === c.id ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                       Reconnect
                     </DropdownMenuItem>
+                    {c.setupNeeded && (
+                      <DropdownMenuItem onClick={() => openSetup(c)}>
+                        <KeyRound />
+                        Set up credentials
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem onClick={() => duplicateConnection(c)}>
                       <Copy />
                       Duplicate
@@ -250,6 +290,7 @@ export function McpConnectionsPage() {
         onToggle={toggleConnection}
         onTest={testConnection}
         onReconnect={reconnectConnection}
+        onSetup={openSetup}
         onEdit={(c) => openEdit(c)}
         onDuplicate={duplicateConnection}
         onDelete={(c) => setDeleteTarget(c)}
@@ -264,6 +305,18 @@ export function McpConnectionsPage() {
       />
 
       <McpConnectionDialog open={createOpen} connection={editing} onOpenChange={setCreateOpen} onSave={upsertConnection} />
+
+      <McpSetupDialog
+        server={setupLib}
+        connection={setupConn}
+        onOpenChange={(open) => {
+          if (!open) setSetupConnId(null)
+        }}
+        onEdit={(c) => {
+          setSetupConnId(null)
+          openEdit(c)
+        }}
+      />
 
       <ConfirmDialog
         open={deleteTarget !== null}

@@ -13,5 +13,11 @@
     "create_channel",
     "get_channel_members"
   ],
-  "mcp": true
+  "mcp": true,
+  "setup": {
+    "auth": {
+      "method": "oauth2",
+      "label": "Connect with Slack"
+    }
+  }
 }

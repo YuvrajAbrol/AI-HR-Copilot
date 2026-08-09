@@ -54,12 +54,13 @@ export interface SettingsResponse {
 }
 
 export type McpTestServerSpec =
-  | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string }
+  | { type: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string; auth?: McpServerConfig["auth"] }
   | {
       type: "http" | "sse" | "streamable-http"
       url: string
       headers?: Record<string, string>
       api_key?: string
+      auth?: McpServerConfig["auth"]
       timeout?: number
     }
 
@@ -128,6 +129,10 @@ export interface MarketplacePluginInfo {
   authentication?: string | null
   tools?: string[]
   mcp?: boolean
+  /** Dynamic setup schema (auth method + fields) for the integration UI form. */
+  setup?: Record<string, unknown> | null
+  /** The integration's .mcp.json "mcpServers" templates. */
+  servers?: Record<string, unknown> | null
 }
 
 export interface SecretItem {
@@ -277,6 +282,12 @@ export function buildTestServerSpec(conn: McpConnection): McpTestServerSpec | nu
   }
   const apiKey = conn.auth === "API Key" ? authValue(conn) : undefined
   if (apiKey) remote.api_key = apiKey
+  // Carry the saved auth (bearer/basic/oauth2 state) into the probe so OAuth
+  // servers can be tested with their persisted session.
+  const savedAuth = conn.config?.auth
+  if (savedAuth && typeof savedAuth === "object" && Object.keys(savedAuth).length > 0) {
+    remote.auth = savedAuth
+  }
   return remote as McpTestServerSpec
 }
 

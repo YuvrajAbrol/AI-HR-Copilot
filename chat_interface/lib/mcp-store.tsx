@@ -82,6 +82,32 @@ function authPreview(server: mcpApi.McpServerConfig): string {
   return `${value.slice(0, 4)}…${value.slice(-4)}`
 }
 
+/** Collected values from a dynamic setup form, keyed by ${VAR} name. */
+export interface McpSetupValues {
+  /** Field name -> value (schema fields + token_field). */
+  values: Record<string, string | boolean>
+  /** Persisted OAuth session for method="oauth2" servers (from oauthStatus). */
+  oauthState?: Record<string, unknown> | null
+  /** True for OAuth integrations (stores client fields per-server in env). */
+  isOAuth?: boolean
+}
+
+/** Substitute `${VAR}` placeholders in a server template with collected values.
+ *  Unknown placeholders are left intact (they resolve from global secrets at
+ *  conversation build time). */
+export function substitutePlaceholders(obj: Record<string, unknown>, values: Record<string, string | boolean>): void {
+  for (const key of Object.keys(obj)) {
+    const val = obj[key]
+    if (typeof val === "string") {
+      obj[key] = val.replace(/\$\{([A-Z0-9_]+)\}/g, (match, name: string) =>
+        typeof values[name] === "string" ? (values[name] as string) : match,
+      )
+    } else if (val && typeof val === "object") {
+      substitutePlaceholders(val as Record<string, unknown>, values)
+    }
+  }
+}
+
 
 function buildConnection(name: string, server: mcpApi.McpServerConfig, existing?: McpConnection): McpConnection {
   const auth = server.auth
@@ -89,6 +115,9 @@ function buildConnection(name: string, server: mcpApi.McpServerConfig, existing?
   const authConfigured = Boolean(
     auth && (typeof auth.value === "string" ? auth.value.length > 0 : Boolean(auth.password || auth.state)),
   )
+  // An OAuth2 server that never completed a browser flow has no usable session
+  // (auth.state) — it genuinely needs setup regardless of any ciphertext value.
+  const oauthUnconfigured = authStrategy === "oauth2" && Boolean(auth) && !auth?.state && !auth?.value
   const transport = server.transport
   const serverType = (transport ? TRANSPORT_TO_TYPE[transport] : undefined) ?? "HTTP"
   const url = server.url ?? (serverType === "Stdio" && server.command ? `stdio://${server.command}` : "")
@@ -119,7 +148,12 @@ function buildConnection(name: string, server: mcpApi.McpServerConfig, existing?
     id: name,
     name,
     description: server.description ?? `${name} MCP server`,
-    connected: true,
+    // Never faked: a server is "connected" only when it does not need setup.
+    // Reachability (whether it actually responds) is tracked separately by
+    // `health` from probe results — see applySetupContext for the ${VAR}-ref pass.
+    connected: !oauthUnconfigured && (existing?.connected ?? true),
+    setupNeeded: oauthUnconfigured,
+    missingSecrets: [],
     serverType,
     url,
     auth: AUTH_STRATEGY_LABEL[authStrategy] ?? "None",
@@ -174,8 +208,11 @@ function connectionToConfig(conn: McpConnection): mcpApi.McpServerConfig {
   if (Object.keys(env).length > 0) config.env = env
 
   const strategy = authStrategyFor(conn.auth)
-  const prevAuth = conn.config?.auth as { strategy?: string; value?: string | null } | null | undefined
-  config.auth = { strategy, value: prevAuth?.value ?? null }
+  // Preserve the full saved auth (value, oauth2 state, basic username/password,
+  // api_key header_name, …) so saving a connection never drops what the OAuth
+  // flow or auth UI persisted. Only the strategy is re-derived from the label.
+  const prevAuth = conn.config?.auth as Record<string, unknown> | null | undefined
+  config.auth = { strategy, ...(prevAuth ?? {}) }
 
   // Include per-tool permissions if they differ from defaults
   const toolPermissions: Record<string, "allow" | "deny" | "ask"> = {}
@@ -206,6 +243,50 @@ function authStrategyFor(authLabel: string): string {
     default:
       return "none"
   }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Setup status (which servers genuinely need credentials)            */
+/* ------------------------------------------------------------------ */
+
+/** Collect every `${VAR}` reference from a raw .mcp.json server template.
+ *  Works on the catalog's unencrypted template (never on settings, whose
+ *  values are SecretStr-ciphertext on the wire). */
+function refsFromTemplate(template: Record<string, unknown>): string[] {
+  const refs = new Set<string>()
+  const scan = (obj: unknown) => {
+    if (typeof obj === "string") {
+      for (const m of obj.matchAll(/\$\{([A-Z0-9_]+)\}/g)) refs.add(m[1])
+    } else if (obj && typeof obj === "object") {
+      for (const v of Object.values(obj as Record<string, unknown>)) scan(v)
+    }
+  }
+  if (template.env) scan(template.env)
+  if (template.headers) scan(template.headers)
+  if (template.auth && typeof template.auth === "object") scan((template.auth as Record<string, unknown>).value)
+  return [...refs]
+}
+
+/** Refine each connection's setup status using the marketplace template for
+ *  that server (raw ${VAR} refs) plus the stored global-secret names. A server
+ *  needs setup when any referenced secret is missing, or when its OAuth2 flow
+ *  never completed. Custom (non-template) servers only fail the OAuth check —
+ *  their credentials live in auth.* which buildConnection already validates. */
+function applySetupContext(
+  conns: McpConnection[],
+  catalog: LibraryServer[],
+  secrets: Set<string>,
+): McpConnection[] {
+  const libByServer = new Map<string, LibraryServer>()
+  for (const lib of catalog) {
+    for (const serverName of Object.keys(lib.servers ?? {})) libByServer.set(serverName, lib)
+  }
+  return conns.map((c) => {
+    const template = libByServer.get(c.id)?.servers?.[c.id] as Record<string, unknown> | undefined
+    const missing = template ? refsFromTemplate(template).filter((n) => !secrets.has(n)) : []
+    const setupNeeded = missing.length > 0 || c.setupNeeded
+    return { ...c, setupNeeded, missingSecrets: missing, connected: !setupNeeded && c.connected }
+  })
 }
 
 /* ------------------------------------------------------------------ */
@@ -260,10 +341,30 @@ interface McpContextValue {
   deleteConnection: (id: string) => Promise<void>
   duplicateConnection: (conn: McpConnection) => Promise<void>
   upsertConnection: (conn: McpConnection) => Promise<void>
-  installFromLibrary: (lib: LibraryServer, apiKey: string, envVars: EnvVar[]) => Promise<void>
+  /** Install a marketplace integration and provision its servers into mcp_config.
+   *  Resolves with the provisioned per-server configs (merged), or null on failure. */
+  installAndProvision: (lib: LibraryServer, setup: McpSetupValues) => Promise<Record<string, mcpApi.McpServerConfig> | null>
+  /** Start a browser-coordinated OAuth flow against a probe spec; returns job_id. */
+  startOAuth: (
+    spec: mcpApi.McpTestServerSpec,
+    opts?: { clientId?: string; clientSecret?: string },
+  ) => Promise<string | null>
+  /** Poll an OAuth job until it completes, invoking onSuccess with the session state. */
+  completeOAuth: (
+    jobId: string,
+    onSuccess?: (oauthState: Record<string, unknown>) => void,
+  ) => Promise<"ok" | "failed">
+  /** Save an OAuth session into an existing connection's server config. */
+  persistOAuthState: (connId: string, oauthState: Record<string, unknown>) => Promise<void>
+  /** Save an OAuth session into a freshly-provisioned server config (install flow). */
+  saveServerAuth: (serverName: string, serverConfig: mcpApi.McpServerConfig, oauthState: Record<string, unknown>) => Promise<void>
   updateTool: (connId: string, toolName: string, patch: Partial<Pick<McpTool, "enabled" | "permission">>) => void
   saveConfig: (connId: string, patch: Partial<Pick<McpConnection, "envVars" | "authConfigured" | "authTokenPreview">>) => Promise<void>
   setApiKey: (id: string, key: string) => Promise<void>
+  /** Persist a global secret by name (setup flow). */
+  saveSecret: (name: string, value: string) => Promise<void>
+  /** Merge a partial patch into a server's settings.mcp_config entry. */
+  patchServerConfig: (connId: string, patch: Partial<mcpApi.McpServerConfig>) => Promise<void>
   rotateAuth: (id: string) => Promise<void>
   revokeAuth: (id: string) => Promise<void>
 }
@@ -278,16 +379,25 @@ export function McpProvider({ children }: { children: ReactNode }) {
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reconnectingId, setReconnectingId] = useState<string | null>(null)
   const [rotatingId, setRotatingId] = useState<string | null>(null)
+  // Names of stored global secrets — the source of truth for whether a
+  // template's ${VAR} references are resolvable.
+  const [secretNames, setSecretNames] = useState<Set<string>>(new Set())
 
   /* ---------------- settings -> connections ---------------- */
 
   const load = useCallback(async () => {
     try {
-      const settings = await mcpApi.getSettings()
+      const [settings, secretsRes] = await Promise.all([
+        mcpApi.getSettings(),
+        mcpApi.listSecrets().catch(() => ({ secrets: [] })),
+      ])
       const config = settings.agent_settings.mcp_config ?? {}
+      const secretSet = new Set(secretsRes.secrets.map((s) => s.name))
+      setSecretNames(secretSet)
       setConnections((prev) => {
         const prevById = new Map(prev.map((c) => [c.id, c]))
-        return Object.entries(config).map(([name, server]) => buildConnection(name, server, prevById.get(name)))
+        const base = Object.entries(config).map(([name, server]) => buildConnection(name, server, prevById.get(name)))
+        return applySetupContext(base, catalog, secretSet)
       })
       setDataSource(Object.keys(config).length > 0 ? "backend" : "empty")
     } catch (error) {
@@ -295,7 +405,7 @@ export function McpProvider({ children }: { children: ReactNode }) {
       setDataSource("empty")
       toast.error(error instanceof Error ? error.message : "Failed to load MCP servers")
     }
-  }, [])
+  }, [catalog])
 
   useEffect(() => {
     void load()
@@ -325,6 +435,11 @@ export function McpProvider({ children }: { children: ReactNode }) {
           ref: p.ref,
           repo_path: p.repo_path,
           mcp: p.mcp ?? true,
+          // Backend truth: plugin-installed state + dynamic setup schema +
+          // .mcp.json server templates for the integration.
+          installed: p.installed,
+          setup: (p.setup as LibraryServer["setup"]) ?? undefined,
+          servers: (p.servers as LibraryServer["servers"]) ?? undefined,
         })),
       )
     } catch (error) {
@@ -429,36 +544,185 @@ export function McpProvider({ children }: { children: ReactNode }) {
 
   /* ---------------- install ---------------- */
 
-  const installFromLibrary = useCallback(
-    async (lib: LibraryServer, apiKey: string, envVars: EnvVar[]) => {
+  const installAndProvision = useCallback(
+    async (lib: LibraryServer, setup: McpSetupValues): Promise<Record<string, mcpApi.McpServerConfig> | null> => {
+      const servers = lib.servers
       try {
-        if (lib.source) {
-          await mcpApi.installPlugin(lib.source, lib.ref ?? undefined, lib.repo_path ?? undefined)
-        }
-        // Store any entered credentials as secrets so ${VAR} placeholders in
-        // the plugin's .mcp.json resolve at conversation build time.
-        const secretCandidates: { key: string; value: string }[] = []
-        for (const v of envVars) {
-          if (v.key.trim() && v.value) secretCandidates.push({ key: v.key.trim(), value: v.value })
-        }
-        if (apiKey) {
-          const key = `${lib.name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_ACCESS_TOKEN`
-          if (!secretCandidates.some((s) => s.key === key)) secretCandidates.push({ key, value: apiKey })
-        }
-        for (const s of secretCandidates) {
+        // 1) Install the plugin unless it is already installed. A stale catalog
+        //    flag or a concurrent install surfaces the backend's "already
+        //    installed" FileExistsError as a 409 — fall back to refreshing the
+        //    existing copy instead of erroring out.
+        if (!lib.installed && lib.source) {
           try {
-            await mcpApi.setSecret(s.key, s.value)
+            await mcpApi.installPlugin(lib.source, lib.ref ?? undefined, lib.repo_path ?? undefined)
           } catch (error) {
-            console.warn(`Failed to store secret ${s.key}:`, error)
+            if (!/already installed/i.test(error instanceof Error ? error.message : "")) throw error
+            try {
+              await mcpApi.refreshPlugin(lib.name)
+            } catch {
+              /* best-effort refresh */
+            }
           }
         }
+
+        // 2) Persist every provided value as a global secret so ${VAR}
+        //    placeholders in the plugin's ambient .mcp.json resolve at
+        //    conversation build time.
+        for (const [name, value] of Object.entries(setup.values)) {
+          if (typeof value === "string" && value.trim()) {
+            try {
+              await mcpApi.setSecret(name, value.trim())
+            } catch (error) {
+              console.warn(`Failed to store secret ${name}:`, error)
+            }
+          }
+        }
+
+        // No server templates — plugin-only install. The integration is added
+        // to the catalog as installed; the user configures credentials from the
+        // MCP page. Return {} (truthy) so the dialog closes cleanly.
+        if (!servers || Object.keys(servers).length === 0) {
+          await loadCatalog()
+          toast.success(`${lib.name} installed`, {
+            description: "Configure credentials from the MCP page",
+          })
+          return {}
+        }
+
+        // 3) Provision each template into settings.mcp_config, substituting
+        //    collected values into ${VAR} placeholders (per-server copy) and
+        //    merging with any saved config so auth state / permissions survive
+        //    a re-install.
+        const diff: Record<string, mcpApi.McpServerConfig> = {}
+        for (const [serverName, template] of Object.entries(servers)) {
+          const server = JSON.parse(JSON.stringify(template)) as mcpApi.McpServerConfig
+          substitutePlaceholders(server as unknown as Record<string, unknown>, setup.values)
+
+          // OAuth client id/secret: keep them per-server in env even though the
+          // template never references them by ${VAR} (they feed the OAuth flow).
+          if (setup.isOAuth && lib.setup?.auth) {
+            const { client_id, client_secret } = lib.setup.auth
+            for (const clientField of [client_id, client_secret]) {
+              if (clientField && typeof setup.values[clientField] === "string") {
+                server.env = { ...(server.env ?? {}), [clientField]: setup.values[clientField] as string }
+              }
+            }
+          }
+
+          // Persist a completed OAuth session into the server's auth.state.
+          if (setup.oauthState) {
+            server.auth = { strategy: "oauth2", state: setup.oauthState }
+          }
+
+          // Merge with the saved config so unrelated per-server settings are kept.
+          const existing = connections.find((c) => c.id === serverName)?.config as
+            | mcpApi.McpServerConfig
+            | undefined
+          const merged: mcpApi.McpServerConfig = { ...(existing ?? {}), ...server }
+          if (existing?.env || server.env) merged.env = { ...(existing?.env ?? {}), ...(server.env ?? {}) }
+          if (existing?.headers || server.headers) {
+            merged.headers = { ...(existing?.headers ?? {}), ...(server.headers ?? {}) }
+          }
+          diff[serverName] = merged
+        }
+
+        await patchConfig(diff)
         await loadCatalog()
-        toast.success(`${lib.name} installed`, { description: "MCP servers from the plugin activate on the next conversation" })
+        toast.success(`${lib.name} installed`, {
+          description:
+            Object.keys(setup.values).length > 0
+              ? "Server configured — test it to discover tools"
+              : "Added to MCP servers — set up credentials from the MCP page",
+        })
+        return diff
       } catch (error) {
         toast.error(error instanceof Error ? error.message : `Failed to install ${lib.name}`)
+        return null
       }
     },
-    [loadCatalog],
+    [connections, loadCatalog, patchConfig],
+  )
+
+  /* ---------------- OAuth ---------------- */
+
+  const startOAuth = useCallback(
+    async (spec: mcpApi.McpTestServerSpec, opts?: { clientId?: string; clientSecret?: string }) => {
+      const auth: Record<string, unknown> = { strategy: "oauth2" }
+      if (opts?.clientId) {
+        auth.authentication = { client_id: opts.clientId, client_secret: opts.clientSecret ?? "" }
+      }
+      spec.auth = auth as NonNullable<mcpApi.McpServerConfig["auth"]>
+      try {
+        const res = await mcpApi.oauthStart({ server: spec })
+        if (res.ok && res.job_id) {
+          if (res.authorization_url) window.open(res.authorization_url, "_blank", "noopener,noreferrer")
+          return res.job_id
+        }
+        toast.error(res.error ?? "Failed to start OAuth")
+        return null
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to start OAuth")
+        return null
+      }
+    },
+    [],
+  )
+
+  /** Persist a completed OAuth session into an existing connection's config. */
+  const persistOAuthState = useCallback(
+    async (connId: string, oauthState: Record<string, unknown>) => {
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return
+      const server: mcpApi.McpServerConfig = {
+        ...(conn.config as mcpApi.McpServerConfig | undefined),
+        auth: { strategy: "oauth2", state: oauthState },
+      }
+      try {
+        await patchConfig({ [connId]: server })
+        toast.success(`${conn.name} authenticated`, { description: "OAuth session saved to this server" })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save OAuth session")
+      }
+    },
+    [connections, patchConfig],
+  )
+
+  /** Persist a completed OAuth session into a freshly-provisioned server config. */
+  const saveServerAuth = useCallback(
+    async (serverName: string, serverConfig: mcpApi.McpServerConfig, oauthState: Record<string, unknown>) => {
+      try {
+        await patchConfig({ [serverName]: { ...serverConfig, auth: { strategy: "oauth2", state: oauthState } } })
+        toast.success(`${serverName} authenticated`, { description: "OAuth session saved to this server" })
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to save OAuth session")
+      }
+    },
+    [patchConfig],
+  )
+
+  const completeOAuth = useCallback(
+    async (jobId: string, onSuccess?: (oauthState: Record<string, unknown>) => void): Promise<"ok" | "failed"> => {
+      const poll = async (): Promise<"ok" | "failed"> => {
+        let res: mcpApi.OAuthStatusResponse
+        try {
+          res = await mcpApi.oauthStatus(jobId)
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "OAuth status check failed")
+          return "failed"
+        }
+        if (res.ok && res.status === "succeeded") {
+          if (res.oauth_state) onSuccess?.(res.oauth_state)
+          return "ok"
+        }
+        if (res.status === "failed") {
+          toast.error(res.error ?? "OAuth failed")
+          return "failed"
+        }
+        return new Promise<"ok" | "failed">((resolve) => setTimeout(() => void poll().then(resolve), 1500))
+      }
+      return poll()
+    },
+    [],
   )
 
   /* ---------------- probe / test ---------------- */
@@ -644,22 +908,44 @@ export function McpProvider({ children }: { children: ReactNode }) {
     [connections, patchConfig],
   )
 
+  /** Clear the stored credential (value + oauth2 state) while keeping any
+   *  structural auth fields (header_name, username, …). Shared by rotate and
+   *  revoke; OAuth servers re-run the Connect flow to rotate. */
+  const clearAuth = useCallback(
+    async (id: string) => {
+      const conn = connections.find((c) => c.id === id)
+      if (!conn) return
+      const strategy = authStrategyFor(conn.auth)
+      const saved = conn.config?.auth as Record<string, unknown> | undefined
+      const base = saved && typeof saved === "object" ? { ...saved } : {}
+      const cleared: Record<string, unknown> = { ...base, strategy, value: null }
+      delete cleared.state
+      const server: mcpApi.McpServerConfig = {
+        ...(conn.config as mcpApi.McpServerConfig),
+        auth: cleared as mcpApi.McpServerConfig["auth"],
+      }
+      return patchConfig({ [id]: server })
+    },
+    [connections, patchConfig],
+  )
+
   const rotateAuth = useCallback(
     async (id: string) => {
       const conn = connections.find((c) => c.id === id)
       if (!conn) return
       setRotatingId(id)
       try {
-        const strategy = authStrategyFor(conn.auth)
-        await patchConfig({ [id]: { ...(conn.config as mcpApi.McpServerConfig), auth: { strategy, value: null } } })
-        toast.success("Credential cleared — enter a new value to rotate", { description: "For OAuth servers use the OAuth flow (Phase 8)." })
+        await clearAuth(id)
+        toast.success("Credential cleared — enter a new value to rotate", {
+          description: "For OAuth servers use the OAuth flow to re-authorize.",
+        })
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to rotate credential")
       } finally {
         setRotatingId(null)
       }
     },
-    [connections, patchConfig],
+    [clearAuth, connections],
   )
 
   const revokeAuth = useCallback(
@@ -667,12 +953,34 @@ export function McpProvider({ children }: { children: ReactNode }) {
       const conn = connections.find((c) => c.id === id)
       if (!conn) return
       try {
-        const strategy = authStrategyFor(conn.auth)
-        await patchConfig({ [id]: { ...(conn.config as mcpApi.McpServerConfig), auth: { strategy, value: null } } })
+        await clearAuth(id)
         toast.success("Credential revoked")
       } catch (error) {
         toast.error(error instanceof Error ? error.message : "Failed to revoke credential")
       }
+    },
+    [clearAuth, connections],
+  )
+
+  /* ---------------- secrets + server patch (setup flow) ---------------- */
+
+  /** Persist a global secret so ${VAR} references in a server template
+   *  resolve at conversation build time. Used by the Setup dialog. */
+  const saveSecret = useCallback(async (name: string, value: string) => {
+    await mcpApi.setSecret(name, value)
+  }, [])
+
+  /** Merge a partial patch into a server's settings.mcp_config entry (env
+   *  merged, everything else shallow-merged). Used to persist OAuth client
+   *  fields and completed sessions without touching unrelated settings. */
+  const patchServerConfig = useCallback(
+    async (connId: string, patch: Partial<mcpApi.McpServerConfig>) => {
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return
+      const base = conn.config as mcpApi.McpServerConfig | undefined
+      const merged: mcpApi.McpServerConfig = { ...(base ?? {}), ...patch }
+      if (base?.env || patch.env) merged.env = { ...(base?.env ?? {}), ...(patch.env ?? {}) }
+      await patchConfig({ [connId]: merged })
     },
     [connections, patchConfig],
   )
@@ -738,10 +1046,16 @@ export function McpProvider({ children }: { children: ReactNode }) {
       deleteConnection,
       duplicateConnection,
       upsertConnection,
-      installFromLibrary,
+      installAndProvision,
+      startOAuth,
+      completeOAuth,
+      persistOAuthState,
+      saveServerAuth,
       updateTool,
       saveConfig,
       setApiKey,
+      saveSecret,
+      patchServerConfig,
       rotateAuth,
       revokeAuth,
     }),
@@ -763,10 +1077,16 @@ export function McpProvider({ children }: { children: ReactNode }) {
       deleteConnection,
       duplicateConnection,
       upsertConnection,
-      installFromLibrary,
+      installAndProvision,
+      startOAuth,
+      completeOAuth,
+      persistOAuthState,
+      saveServerAuth,
       updateTool,
       saveConfig,
       setApiKey,
+      saveSecret,
+      patchServerConfig,
       rotateAuth,
       revokeAuth,
     ],

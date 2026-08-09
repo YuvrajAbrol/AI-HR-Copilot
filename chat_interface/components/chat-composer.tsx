@@ -14,6 +14,7 @@ import {
   Globe,
   Check,
   X,
+  Square,
 } from "lucide-react"
 import { OptionMenu } from "@/components/option-menu"
 import { VoiceRecorder } from "@/components/voice-recorder"
@@ -27,9 +28,19 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({ prefill }: ChatComposerProps) {
-  const { sendMessage, model, setModel, tone, setTone, dataSource, setDataSource, webSearch, toggleWebSearch } =
-    useChat()
-  const { startRun } = useAgentRuntime()
+  const {
+    sendMessage,
+    model,
+    setModel,
+    tone,
+    setTone,
+    dataSource,
+    setDataSource,
+    webSearch,
+    toggleWebSearch,
+    isRunning,
+  } = useChat()
+  const { startRun, stopRun } = useAgentRuntime()
   const [input, setInput] = useState("")
   const [attachOpen, setAttachOpen] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
@@ -68,11 +79,16 @@ export function ChatComposer({ prefill }: ChatComposerProps) {
   }, [input])
 
   const handleSend = () => {
-    if (!input.trim()) return
+    if (!input.trim() || isRunning) return
     startRun(input.trim())
     sendMessage(input)
     setInput("")
     setAttachments([])
+  }
+
+  const handleStop = () => {
+    stopRun()
+    textareaRef.current?.focus()
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -266,18 +282,30 @@ export function ChatComposer({ prefill }: ChatComposerProps) {
             >
               <Mic className="h-4 w-4" />
             </button>
-            <button
-              onClick={handleSend}
-              disabled={!input.trim()}
-              className="btn-3d btn-glow flex items-center gap-2 rounded-md border border-white/20 bg-gradient-to-br from-primary via-gray-900 to-black px-3 py-1.5 text-[13px] font-medium text-white shadow-xl transition-all hover:from-gray-900 hover:to-black disabled:opacity-40"
-            >
-              <SendHorizontal className="h-3.5 w-3.5" />
-              Send
-              <span className="flex items-center gap-0.5 text-neutral-400">
-                <Command className="h-3 w-3" />
-                <span className="text-[12px]">/</span>
-              </span>
-            </button>
+            {isRunning ? (
+              <button
+                onClick={handleStop}
+                aria-label="Stop generation"
+                title="Stop the current run"
+                className="btn-3d flex items-center gap-2 rounded-md border border-white/20 bg-gradient-to-br from-red-500/80 via-red-800 to-black px-3 py-1.5 text-[13px] font-medium text-white shadow-xl transition-all hover:from-red-500 hover:to-black"
+              >
+                <Square className="h-3.5 w-3.5" />
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={handleSend}
+                disabled={!input.trim()}
+                className="btn-3d btn-glow flex items-center gap-2 rounded-md border border-white/20 bg-gradient-to-br from-primary via-gray-900 to-black px-3 py-1.5 text-[13px] font-medium text-white shadow-xl transition-all hover:from-gray-900 hover:to-black disabled:opacity-40"
+              >
+                <SendHorizontal className="h-3.5 w-3.5" />
+                Send
+                <span className="flex items-center gap-0.5 text-neutral-400">
+                  <Command className="h-3 w-3" />
+                  <span className="text-[12px]">/</span>
+                </span>
+              </button>
+            )}
           </div>
         </div>
       </div>

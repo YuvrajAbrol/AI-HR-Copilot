@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 from time import monotonic
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -231,6 +232,11 @@ class MarketplacePluginInfo(BaseModel):
     path: str | None = None
     skills: list[PluginSkillSummary] | None = None
     files: list[str] | None = None
+    # Integration setup — present for bundled (network-free) integrations: the
+    # dynamic setup schema (auth method + fields) and the .mcp.json server
+    # templates, loaded from the integration directory at catalog-build time.
+    setup: dict[str, Any] | None = None
+    servers: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +453,7 @@ def _bundled_integration_entries(
                 f"Failed to resolve integration {entry.name!r}", exc_info=True
             )
             continue
+        setup, servers = marketplace.load_integration_contents(entry)
         entries.append(
             MarketplacePluginInfo(
                 name=entry.name,
@@ -459,6 +466,8 @@ def _bundled_integration_entries(
                 authentication=entry.authentication,
                 tools=entry.tools,
                 mcp=entry.mcp,
+                setup=setup,
+                servers=servers,
             )
         )
     return entries

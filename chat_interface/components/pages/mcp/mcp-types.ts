@@ -4,6 +4,9 @@ export type ServerType = "HTTP" | "SSE" | "Stdio" | "WebSocket"
 export type Health = "healthy" | "degraded" | "unknown" | "error"
 export type ToolPermission = "allow" | "deny" | "ask"
 export type LogStatus = "default" | "success" | "warning" | "error"
+/** Real setup state of an installed server: "needs-setup" when credentials or
+ *  an OAuth session are still missing, "ready" when it is authenticated. */
+export type McpSetupStatus = "needs-setup" | "ready"
 
 export interface McpTool {
   name: string
@@ -72,6 +75,48 @@ export interface McpConnection {
   /** Raw backend server config (settings.mcp_config entry) — used to build
    *  probe requests. Never rendered. */
   config?: Record<string, unknown>
+  /** True when the server still needs credentials/OAuth before it is usable:
+   *  unresolved ${VAR} secrets from its marketplace template, or an OAuth2
+   *  server without a persisted session. Drives the "Setup needed" state. */
+  setupNeeded: boolean
+  /** ${VAR} names referenced by this server's template that have no global
+   *  secret stored yet. Empty for custom servers (not template-backed). */
+  missingSecrets: string[]
+}
+
+/** Setup field types rendered by the dynamic setup form. */
+export type SetupFieldType = "text" | "password" | "textarea" | "select" | "boolean"
+
+/** A single field in an integration's dynamic setup schema. */
+export interface SetupField {
+  name: string
+  label: string
+  type: SetupFieldType
+  secret?: boolean
+  required?: boolean
+  placeholder?: string
+  hint?: string
+  options?: string[]
+}
+
+/** Auth config of a dynamic setup schema — drives which auth UI renders. */
+export interface SetupAuthConfig {
+  /** "oauth2" → Connect-with-… flow; "token" → one secret field; "env" → fields only; "none". */
+  method: "oauth2" | "token" | "env" | "none"
+  label?: string
+  /** For method="token": the ${VAR} name the value substitutes into. */
+  token_field?: string
+  /** For method="oauth2": optional client id/secret field names. */
+  client_id?: string
+  client_secret?: string
+  hint?: string
+}
+
+/** Backend-served dynamic setup schema for an MCP integration. */
+export interface McpSetupSchema {
+  auth: SetupAuthConfig
+  fields?: SetupField[]
+  instructions?: string
 }
 
 export interface LibraryServer {
@@ -93,6 +138,12 @@ export interface LibraryServer {
   mcp?: boolean
   /** Auth method label exposed by the catalog, e.g. "OAuth 2.0". */
   authentication?: string
+  /** True when the plugin is installed (backend catalog truth). */
+  installed?: boolean
+  /** Dynamic setup schema for the integration (from the backend catalog). */
+  setup?: McpSetupSchema
+  /** The integration's .mcp.json "mcpServers" templates (from the catalog). */
+  servers?: Record<string, unknown>
 }
 
 export const SERVER_TYPES: ServerType[] = ["HTTP", "SSE", "Stdio", "WebSocket"]

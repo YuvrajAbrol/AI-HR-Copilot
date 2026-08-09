@@ -21,7 +21,7 @@ import {
   SegmentedTabs,
   Tag,
 } from "@/components/management/shared"
-import { McpConnectionDialog, McpInstallDialog } from "@/components/pages/mcp/mcp-dialogs"
+import { McpConnectionDialog } from "@/components/pages/mcp/mcp-dialogs"
 import { SkillActivateDialog } from "./skill-activate-dialog"
 import { SKILL_TEMPLATES } from "@/components/pages/skills/skill-data"
 import type { LibraryServer } from "@/components/pages/mcp/mcp-types"
@@ -400,6 +400,7 @@ function McpSection({
                 serverType={lib.serverType}
                 installed={installedNames.has(lib.name.toLowerCase())}
                 onInstall={() => onInstall(lib.id)}
+                onConfigure={() => onInstall(lib.id)}
               />
             </div>
           ))}
@@ -422,18 +423,27 @@ const SIDEBAR_NAV = [
 export function MarketplaceDashboard() {
   const { marketplaceSection, setMarketplaceSection, marketplaceOrigin, setView } = useNavigation()
   const { skills, installTemplate } = useSkills()
-  const { connections, catalog, catalogLoading, installFromLibrary, upsertConnection } = useMcp()
+  const { connections, catalog, catalogLoading, upsertConnection, installAndProvision } = useMcp()
 
   const [skillQuery, setSkillQuery] = useState("")
   const [skillCategory, setSkillCategory] = useState("All")
   const [mcpQuery, setMcpQuery] = useState("")
   const [mcpCategory, setMcpCategory] = useState("All")
-  const [installTarget, setInstallTarget] = useState<LibraryServer | null>(null)
   const [customOpen, setCustomOpen] = useState(false)
   const [activateTarget, setActivateTarget] = useState<SkillTemplate | null>(null)
 
   const installedSkillNames = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills])
-  const installedServerNames = useMemo(() => new Set(connections.map((c) => c.name.toLowerCase())), [connections])
+  // Installed-state truth comes from the backend catalog's `installed` flag
+  // (plugin install dir) unioned with servers present in settings.mcp_config —
+  // an installed plugin never shows a spurious "Install" button again.
+  const installedServerNames = useMemo(
+    () =>
+      new Set([
+        ...catalog.filter((l) => l.installed).map((l) => l.name.toLowerCase()),
+        ...connections.map((c) => c.name.toLowerCase()),
+      ]),
+    [catalog, connections],
+  )
 
   const installSkill = (id: string) => {
     const tpl = SKILL_TEMPLATES.find((t) => t.id === id)
@@ -442,9 +452,17 @@ export function MarketplaceDashboard() {
   const handleActivate = (tpl: SkillTemplate, flags: SkillPermissionFlags) => {
     installTemplate(tpl, { flags })
   }
-  const installMcp = (id: string) => {
+  // Marketplace Install = add-only. It installs the plugin and provisions the
+  // .mcp.json servers with ${VAR} placeholders intact (no credentials are
+  // collected here), then lands on the MCP page where the Setup dialog drives
+  // authentication. installAndProvision(lib, { values: {} }) is a no-op
+  // reinstall when the integration is already installed, so "Configure" and
+  // "Install" both end up in the same place.
+  const installMcp = async (id: string) => {
     const lib = catalog.find((l) => l.id === id)
-    if (lib) setInstallTarget(lib)
+    if (!lib) return
+    await installAndProvision(lib, { values: {} })
+    setView("mcp")
   }
 
   return (
@@ -568,13 +586,6 @@ export function MarketplaceDashboard() {
           if (!open) setActivateTarget(null)
         }}
         onActivate={handleActivate}
-      />
-      <McpInstallDialog
-        server={installTarget}
-        onOpenChange={(open) => {
-          if (!open) setInstallTarget(null)
-        }}
-        onInstall={(lib, apiKey, envVars) => installFromLibrary(lib, apiKey, envVars)}
       />
       <McpConnectionDialog
         open={customOpen}

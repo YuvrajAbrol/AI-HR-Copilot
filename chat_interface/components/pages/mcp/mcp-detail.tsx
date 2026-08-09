@@ -25,9 +25,12 @@ import {
   CircleDot,
   Lock,
   Check,
+  ExternalLink,
 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import * as mcpApi from "@/lib/mcp-api"
+import { useMcp } from "@/lib/mcp-store"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
@@ -99,6 +102,7 @@ export interface McpDetailPanelProps {
   onToggle: (id: string) => void
   onTest: (id: string) => void
   onReconnect: (id: string) => void
+  onSetup: (conn: McpConnection) => void
   onEdit: (conn: McpConnection) => void
   onDuplicate: (conn: McpConnection) => void
   onDelete: (conn: McpConnection) => void
@@ -118,6 +122,7 @@ export function McpDetailPanel({
   onToggle,
   onTest,
   onReconnect,
+  onSetup,
   onEdit,
   onDuplicate,
   onDelete,
@@ -146,6 +151,9 @@ export function McpDetailPanel({
         connection ? (
           <>
             <StatusPill active={connection.connected} />
+            {connection.setupNeeded && (
+              <StatusBadge status="warning">Setup needed</StatusBadge>
+            )}
             {health && <StatusBadge status={health.tone}>{health.label}</StatusBadge>}
             <Tag>{connection.serverType}</Tag>
             <Tag>{connection.category}</Tag>
@@ -170,6 +178,12 @@ export function McpDetailPanel({
                 <Pencil />
                 Edit configuration
               </DropdownMenuItem>
+              {connection.setupNeeded && (
+                <DropdownMenuItem onClick={() => onSetup(connection)} className="gap-2 text-[13px]">
+                  <KeyRound />
+                  Set up credentials
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={() => onDuplicate(connection)} className="gap-2 text-[13px]">
                 <Copy />
                 Duplicate
@@ -201,12 +215,22 @@ export function McpDetailPanel({
       footer={
         connection ? (
           <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Switch checked={connection.connected} onCheckedChange={() => onToggle(connection.id)} aria-label={`Toggle ${connection.name}`} />
-              <span className="text-[13px] text-muted-foreground">
-                {connection.connected ? "Connected" : "Disconnected"}
-              </span>
-            </div>
+            {connection.setupNeeded ? (
+              <Button
+                onClick={() => onSetup(connection)}
+                className="gap-2 border border-amber-500/25 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 hover:text-amber-200"
+              >
+                <KeyRound className="h-4 w-4" />
+                Set up credentials
+              </Button>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Switch checked={connection.connected} onCheckedChange={() => onToggle(connection.id)} aria-label={`Toggle ${connection.name}`} />
+                <span className="text-[13px] text-muted-foreground">
+                  {connection.connected ? "Connected" : "Disconnected"}
+                </span>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <Button variant="ghost" onClick={() => onReconnect(connection.id)} disabled={reconnecting} className="gap-2">
                 {reconnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
@@ -582,11 +606,16 @@ function AuthSection({
   onRevokeAuth: (id: string) => void
   rotating: boolean
 }) {
+  const { startOAuth, completeOAuth, persistOAuthState } = useMcp()
   const [settingKey, setSettingKey] = useState(false)
   const [newKey, setNewKey] = useState("")
   const [showNewKey, setShowNewKey] = useState(false)
+  const [oauthBusy, setOauthBusy] = useState(false)
 
-  const noAuth = conn.auth === "None"
+  const savedAuth = conn.config?.auth as Record<string, unknown> | undefined
+  const isOAuth = savedAuth?.strategy === "oauth2"
+  const oauthConfigured = Boolean(savedAuth?.state)
+  const noAuth = conn.auth === "None" || savedAuth?.strategy === "none"
   // Only the real masked preview from the backend config is shown — secrets
   // never round-trip to the browser, so there is nothing to "reveal" or copy.
   const token = conn.authTokenPreview ?? "••••••••••••"
@@ -601,18 +630,49 @@ function AuthSection({
     setNewKey("")
   }
 
+  /* OAuth servers rotate by re-running the browser flow, not by pasting a
+     token. The saved session is persisted back under auth.state after the
+     browser-coordinated job completes. */
+  const handleConnect = async () => {
+    if (oauthBusy) return
+    const spec = mcpApi.buildTestServerSpec(conn)
+    if (!spec) {
+      toast.error("Cannot build an OAuth probe from this configuration")
+      return
+    }
+    setOauthBusy(true)
+    try {
+      const jobId = await startOAuth(spec)
+      if (jobId) await completeOAuth(jobId, (state) => persistOAuthState(conn.id, state))
+    } finally {
+      setOauthBusy(false)
+    }
+  }
+
   return (
     <PanelSection
       title="Authentication"
       description="Credential used when the agent connects to this server."
       action={
-        conn.authConfigured && !noAuth ? (
+        noAuth ? (
+          <StatusBadge status="neutral">No auth required</StatusBadge>
+        ) : isOAuth ? (
+          oauthConfigured ? (
+            <StatusBadge status="success">
+              <ShieldCheck className="h-3 w-3" />
+              Connected
+            </StatusBadge>
+          ) : (
+            <StatusBadge status="warning">
+              <ShieldOff className="h-3 w-3" />
+              Not authorized
+            </StatusBadge>
+          )
+        ) : conn.authConfigured ? (
           <StatusBadge status="success">
             <ShieldCheck className="h-3 w-3" />
             Configured
           </StatusBadge>
-        ) : noAuth ? (
-          <StatusBadge status="neutral">No auth required</StatusBadge>
         ) : (
           <StatusBadge status="warning">
             <ShieldOff className="h-3 w-3" />
@@ -623,6 +683,41 @@ function AuthSection({
     >
       {noAuth ? (
         <p className="text-[13px] text-muted-foreground">This server does not require any credentials.</p>
+      ) : isOAuth ? (
+        <div className="flex flex-col gap-3">
+          <DetailRow label="Method" value="OAuth 2.0" />
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-secondary/30 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">OAuth session</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {oauthConfigured
+                  ? "A token session is stored for this server."
+                  : "Not authorized yet. Open the provider to grant access."}
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleConnect}
+              disabled={oauthBusy}
+              className="gap-1.5 border border-border/60 bg-secondary/60 text-[12px] hover:bg-secondary"
+            >
+              {oauthBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
+              {oauthConfigured ? "Re-authorize" : "Connect"}
+            </Button>
+          </div>
+          {oauthConfigured && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onRevokeAuth(conn.id)}
+              className="w-fit gap-1.5 text-[12px] text-red-400 hover:bg-red-500/10 hover:text-red-300"
+            >
+              <ShieldOff className="h-3.5 w-3.5" />
+              Revoke session
+            </Button>
+          )}
+        </div>
       ) : (
         <div className="flex flex-col gap-3">
           <DetailRow label="Method" value={conn.auth} />

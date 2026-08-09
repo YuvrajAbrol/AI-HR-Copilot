@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Check,
   Plus,
+  Settings,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -301,6 +302,7 @@ export function ItemCard({
   onToggle,
   onOpen,
   menu,
+  toggle,
 }: {
   icon: ReactNode
   name: string
@@ -309,6 +311,9 @@ export function ItemCard({
   onToggle: (checked: boolean) => void
   onOpen: () => void
   menu?: ReactNode
+  /** Optional replacement for the enable switch (e.g. a Setup button for
+   *  servers that still need credentials). */
+  toggle?: ReactNode
 }) {
   return (
     <div className="group flex items-start gap-4 rounded-xl border border-border/60 bg-card/40 p-5 transition-colors duration-150 hover:border-border hover:bg-card/70">
@@ -327,7 +332,7 @@ export function ItemCard({
         </span>
       </button>
       <div className="flex shrink-0 items-center gap-2 pt-1" onClick={(e) => e.stopPropagation()}>
-        <Switch checked={enabled} onCheckedChange={onToggle} aria-label={`Toggle ${name}`} />
+        {toggle ?? <Switch checked={enabled} onCheckedChange={onToggle} aria-label={`Toggle ${name}`} />}
         {menu}
       </div>
     </div>
@@ -857,6 +862,7 @@ export function MarketplaceMcpCard({
   serverType,
   installed,
   onInstall,
+  onConfigure,
 }: {
   icon: LucideIcon
   name: string
@@ -865,6 +871,7 @@ export function MarketplaceMcpCard({
   serverType: string
   installed: boolean
   onInstall: () => void
+  onConfigure?: () => void
 }) {
   const tone = CATEGORY_TONES[category] ?? "border-border/60 bg-secondary/60 text-foreground"
 
@@ -894,7 +901,19 @@ export function MarketplaceMcpCard({
       <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-2">{description}</p>
       <div className="flex items-center justify-end">
         {installed ? (
-          <InstalledPill />
+          onConfigure ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={onConfigure}
+              className="gap-1.5 border border-border/60 transition-transform duration-150 active:scale-95"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              Configure
+            </Button>
+          ) : (
+            <InstalledPill />
+          )
         ) : (
           <Button
             size="sm"

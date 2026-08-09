@@ -17,5 +17,13 @@
     "get_pull_request",
     "list_pull_requests"
   ],
-  "mcp": true
+  "mcp": true,
+  "setup": {
+    "auth": {
+      "method": "token",
+      "label": "GitHub Personal Access Token",
+      "token_field": "GITHUB_PERSONAL_ACCESS_TOKEN",
+      "hint": "Create a classic PAT at github.com/settings/tokens with `repo` and `read:user` scopes."
+    }
+  }
 }

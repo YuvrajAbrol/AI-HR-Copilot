@@ -10,8 +10,12 @@ from pydantic_core import PydanticSerializationError
 
 from models.llm import LLM
 from models.llm.llm import LLM_SECRET_FIELDS
+from runtime.telemetry.logger import get_logger
 from utilities.cipher import FERNET_TOKEN_PREFIX, Cipher
 from utilities.pydantic_secrets import MissingCipherError
+
+
+logger = get_logger(__name__)
 
 
 ExposeSecretsMode = Literal["encrypted", "plaintext"]
@@ -64,9 +68,23 @@ def parse_expose_secrets_header(request: Request) -> ExposeSecretsMode | None:
 def build_expose_context(
     expose_mode: ExposeSecretsMode | None, cipher: Cipher | None
 ) -> dict[str, Any]:
-    """Build the pydantic serialization context for the given expose mode."""
+    """Build the pydantic serialization context for the given expose mode.
+
+    When ``encrypted`` exposure is requested but no cipher is configured
+    (``OH_SECRET_KEY`` unset), the encrypted contract cannot be honored.
+    Degrade to plaintext instead of erroring: in this degraded mode secrets
+    are already stored and persisted in plaintext (see ``Config.cipher``), so
+    refusing to serve them would only break the settings/profiles flow without
+    any security gain.
+    """
     if expose_mode is None:
         return {}
+    if expose_mode == "encrypted" and cipher is None:
+        logger.warning(
+            "X-Expose-Secrets=encrypted requested but no cipher is configured "
+            "(OH_SECRET_KEY unset); falling back to plaintext secret exposure."
+        )
+        expose_mode = "plaintext"
     return {"expose_secrets": expose_mode, "cipher": cipher}
 
 
@@ -75,6 +93,12 @@ def _has_missing_cipher_cause(exc: BaseException) -> bool:
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
         if isinstance(cur, MissingCipherError):
+            return True
+        # Pydantic stringifies the inner exception into the outer
+        # ``PydanticSerializationError`` message without chaining
+        # ``__cause__``/``__context__`` (observed for nested model dumps of
+        # ``MCPServer.env``/``headers``). Fall back to inspecting the message.
+        if "MissingCipherError" in str(cur):
             return True
         seen.add(id(cur))
         cur = cur.__cause__ or cur.__context__

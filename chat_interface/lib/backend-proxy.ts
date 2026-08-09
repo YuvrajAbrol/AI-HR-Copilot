@@ -29,6 +29,13 @@ export async function proxyToBackend(request: NextRequest, prefix: string): Prom
   if (contentType) headers["Content-Type"] = contentType
   const accept = request.headers.get("accept")
   if (accept) headers["Accept"] = accept
+  // Forward the settings client's encryption preference so secret fields
+  // round-trip as Fernet ciphertext (never as plaintext) through the proxy.
+  // Only "encrypted" is honored: the backend treats "plaintext" as
+  // backend-to-backend-only, so the browser-facing proxy must never forward it.
+  if (request.headers.get("x-expose-secrets") === "encrypted") {
+    headers["X-Expose-Secrets"] = "encrypted"
+  }
 
   let body: string | undefined
   if (method !== "GET" && method !== "HEAD") {

@@ -139,4 +139,24 @@ No code changes — edit `chat_interface\.env.local`, then restart the frontend:
 - **OpenAI:** `LLM_PROVIDER=openai`, set `OPENAI_API_KEY=sk-...` (model `OPENAI_MODEL`, default `gpt-4o`).
 - **Azure OpenAI:** `LLM_PROVIDER=azure`, set `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
   `AZURE_OPENAI_DEPLOYMENT`, `AZURE_OPENAI_API_VERSION`.
+- **Azure AI Foundry serverless (e.g. GPT-5.2):** Foundry's serverless endpoints are
+  OpenAI-compatible, so **use the `openai` provider, not `azure`** (the backend's `azure/`
+  LiteLLM path only understands classic `openai.azure.com` resources and 404s on Foundry).
+  ```
+  LLM_PROVIDER=openai
+  OPENAI_API_KEY=<key>
+  OPENAI_MODEL=gpt-5.2
+  OPENAI_BASE_URL=https://<project>.<region>.services.ai.azure.com/openai/v1
+  ```
+  The backend auto-routes `gpt-5.2` through the Responses API, so the base URL is the
+  `/openai/v1` root — do **not** include the `/responses` suffix (LiteLLM appends it).
+
+### Foundry key/endpoint (project-specific)
+
+The Azure OpenAI key for Foundry lives in the **`group-1` Key Vault** (resource group `AI_Keys`):
+- Secret `Group1OpenAIAPIKey` → the API key value (read via
+  `az keyvault secret show --vault-name group-1 --name Group1OpenAIAPIKey --query value -o tsv`).
+- Secret `Group1OpenAIEndPoint` → `https://sharedfoundry.services.ai.azure.com/openai/v1/responses`
+  (strip the trailing `/responses` for `OPENAI_BASE_URL`).
+- Endpoint auth accepts both `api-key:` and `Authorization: Bearer` headers.
 

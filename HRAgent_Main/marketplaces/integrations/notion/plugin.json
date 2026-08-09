@@ -30,5 +30,13 @@
     "API-retrieve-page-markdown",
     "API-update-page-markdown"
   ],
-  "mcp": true
+  "mcp": true,
+  "setup": {
+    "auth": {
+      "method": "token",
+      "label": "Notion Integration Token",
+      "token_field": "NOTION_TOKEN",
+      "hint": "Create an internal integration at notion.so/my-integrations and copy the `ntn_` token."
+    }
+  }
 }

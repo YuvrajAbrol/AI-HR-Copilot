@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, ClassVar, Final, Literal
 
@@ -43,6 +44,61 @@ def _default_session_api_keys():
     return result
 
 
+def _secret_key_path() -> Path:
+    """Filesystem location for the auto-generated secret key.
+
+    Honors ``OH_PERSISTENCE_DIR`` (same knob the persistence stores use) so
+    containerised deployments can pin a shared volume; otherwise falls back to
+    ``~/.HRAgent/secret.key`` — the same user-config directory that holds
+    credential-bearing profile stores.
+    """
+    env_dir = os.environ.get("OH_PERSISTENCE_DIR")
+    if env_dir:
+        return Path(env_dir) / "secret.key"
+    return Path.home() / ".HRAgent" / "secret.key"
+
+
+def _load_or_create_secret_key() -> SecretStr | None:
+    """Load the persisted secret key, generating and storing one on first run.
+
+    The agent server encrypts secrets (LLM API keys, MCP headers, the
+    conversation secret registry) with a cipher derived from ``secret_key``
+    (``OH_SECRET_KEY``). When the operator has not configured one, this
+    generates a stable random key and persists it so:
+
+    * every launch shares the same cipher (encrypted data survives restarts),
+    * secrets are encrypted at rest instead of written to disk in plaintext,
+    * the settings/profiles ``X-Expose-Secrets: encrypted`` flow no longer
+      raises ``MissingCipherError`` when a client requests encrypted exposure.
+
+    Any failure to read/write the key file degrades to the previous no-cipher
+    behaviour rather than aborting server startup.
+    """
+    try:
+        key_path = _secret_key_path()
+        if key_path.exists():
+            value = key_path.read_text(encoding="utf-8").strip()
+            if value:
+                return SecretStr(value)
+        value = secrets.token_urlsafe(48)
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_text(value, encoding="utf-8")
+        try:
+            # Restrict access to the current user where the OS supports it.
+            key_path.chmod(0o600)
+        except OSError:
+            pass
+        _logger.info("Generated and persisted a secret key at %s", key_path)
+        return SecretStr(value)
+    except Exception as exc:  # pragma: no cover - filesystem/perms edge cases
+        _logger.warning(
+            "Could not persist an auto-generated secret key (%s); falling back "
+            "to no cipher (secrets stored in plaintext).",
+            exc,
+        )
+        return None
+
+
 def _default_secret_key() -> SecretStr | None:
     """
     If the OH_SECRET_KEY environment variable is present, it is read by the EnvParser
@@ -56,7 +112,8 @@ def _default_secret_key() -> SecretStr | None:
     session_api_key = os.getenv(V1_SESSION_API_KEY_ENV)
     if session_api_key:
         return SecretStr(session_api_key)
-    return None
+    # Last resort: a stable auto-generated key so encryption always works.
+    return _load_or_create_secret_key()
 
 
 def _default_web_url() -> str | None:

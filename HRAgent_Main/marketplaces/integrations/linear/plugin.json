@@ -11,5 +11,11 @@
     "linear_update_issue",
     "linear_search_issues"
   ],
-  "mcp": true
+  "mcp": true,
+  "setup": {
+    "auth": {
+      "method": "oauth2",
+      "label": "Connect with Linear"
+    }
+  }
 }

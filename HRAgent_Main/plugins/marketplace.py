@@ -87,6 +87,17 @@ class MarketplaceIntegration(BaseModel):
         default_factory=list, description="Tool names exposed by the integration."
     )
     mcp: bool = Field(default=True, description="True when this is an MCP integration.")
+    setup: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Dynamic setup schema (auth method + fields) for the UI form. "
+            "Loaded from the integration's plugin.json at catalog-build time."
+        ),
+    )
+    servers: dict[str, Any] | None = Field(
+        default=None,
+        description="The integration's .mcp.json 'mcpServers' map, loaded from its directory.",
+    )
 
 
 class Marketplace(BaseModel):
@@ -141,6 +152,43 @@ class Marketplace(BaseModel):
         ``InstallationManager`` unchanged.
         """
         return self._resolve_entry_source(entry)
+
+    def load_integration_contents(
+        self, entry: MarketplaceIntegration
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Load an integration's setup schema and .mcp.json servers.
+
+        Reads ``plugin.json`` (``setup``) and ``.mcp.json`` (``mcpServers``)
+        from the integration's resolved local directory. Returns
+        ``(setup, servers)``, both None when the integration does not resolve
+        to a local directory or the files are missing.
+        """
+        try:
+            source, _, _ = self.resolve_integration_source(entry)
+        except Exception:  # noqa: BLE001 — missing dir is a soft failure
+            return None, None
+        base = Path(source)
+        if not base.is_dir():
+            return None, None
+
+        setup: dict[str, Any] | None = None
+        manifest = base / "plugin.json"
+        if manifest.is_file():
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+                setup = data.get("setup") if isinstance(data, dict) else None
+            except Exception:  # noqa: BLE001 — malformed manifest, keep going
+                setup = None
+
+        servers: dict[str, Any] | None = None
+        mcp_file = base / ".mcp.json"
+        if mcp_file.is_file():
+            try:
+                data = json.loads(mcp_file.read_text(encoding="utf-8"))
+                servers = data.get("mcpServers") if isinstance(data, dict) else None
+            except Exception:  # noqa: BLE001 — malformed .mcp.json, keep going
+                servers = None
+        return setup, servers
 
     def _resolve_entry_source(self, entry: Any) -> tuple[str, str | None, str | None]:
         raw = entry.source
