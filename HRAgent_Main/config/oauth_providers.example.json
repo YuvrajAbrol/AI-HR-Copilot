@@ -1,0 +1,15 @@
+{
+  "_comment": "Template for backend-only OAuth app credentials. Copy this file to ~/.HRAgent/oauth_providers.json (or set OH_OAUTH_PROVIDERS_CONFIG_PATH to point elsewhere) and fill in real values there -- never commit real credentials. See mcp_integration/oauth_provider_config.py for details.",
+
+  "google": {
+    "_comment": "Google Cloud Console -> APIs & Services -> Credentials -> Create Credentials -> OAuth client ID -> Application type: Desktop app. Add redirect URI http://localhost:8765/callback. Used by gmail, google-drive, google-calendar, google-chat, google-people.",
+    "client_id": "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    "client_secret": "YOUR_GOOGLE_CLIENT_SECRET"
+  },
+
+  "slack": {
+    "_comment": "api.slack.com/apps -> Create New App -> OAuth & Permissions -> add redirect URL http://localhost:8765/callback, and enable MCP server access under the app's Assistant settings.",
+    "client_id": "YOUR_SLACK_CLIENT_ID",
+    "client_secret": "YOUR_SLACK_CLIENT_SECRET"
+  }
+}

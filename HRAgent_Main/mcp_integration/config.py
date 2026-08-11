@@ -208,13 +208,13 @@ class MCPHeaderAuthCredential(_MCPBaseModel):
 # redirect_uri by exact match (Slack) rather than allowing any localhost
 # loopback port (Google Desktop-app clients, Linear's DCR) require the
 # integration's registered app to use this exact
-# http://localhost:{port}/callback value. 8765 is arbitrary but fixed so it
-# can be documented once per integration setup guide, and surfaced to the
-# setup UI (see MCPOAuthAuthConfig.redirect_uri) instead of being duplicated
-# as static prose in each integration's plugin.json. One OAuth job runs at a
-# time in practice (single local user), so a shared port is fine.
+# http://localhost:{port}/callback value -- see
+# config/oauth_providers.example.json, where that registration is documented
+# for each provider. 8765 is arbitrary but fixed so it only needs documenting
+# once. One OAuth job runs at a time (see
+# runtime.server.mcp_router._supersede_active_oauth_jobs), so a shared port
+# is fine.
 MCP_OAUTH_CALLBACK_PORT = 8765
-MCP_OAUTH_REDIRECT_URI = f"http://localhost:{MCP_OAUTH_CALLBACK_PORT}/callback"
 
 
 # OAuth's ``expires_in`` is a *relative* duration, only meaningful measured
@@ -316,6 +316,15 @@ class MCPOAuthAuthentication(_MCPBaseModel):
     client_id: str | None = None
     client_secret: SecretStr | None = None
     additional_client_metadata: dict[str, Any] | None = None
+    # Key into the backend-only OAuth provider config (see
+    # mcp_integration.oauth_provider_config) that supplies client_id/secret
+    # for providers without dynamic client registration (Google, Slack).
+    # Set on the integration's .mcp.json template, never by the frontend --
+    # the whole point is that end users and the browser never see or supply
+    # these values. None means this provider either needs no pre-registered
+    # app (DCR-capable, e.g. Linear/Jira) or the caller supplies client_id
+    # directly (legacy/custom servers).
+    provider: str | None = None
 
     @field_validator("client_secret", mode="after")
     @classmethod

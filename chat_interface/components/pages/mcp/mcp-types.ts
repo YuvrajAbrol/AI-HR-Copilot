@@ -99,22 +99,31 @@ export interface SetupField {
   options?: string[]
 }
 
-/** Auth config of a dynamic setup schema — drives which auth UI renders. */
+/** Auth config of a dynamic setup schema — drives which auth UI renders.
+ *
+ *  OAuth app credentials (client ID/secret) and redirect URIs are backend
+ *  deployment configuration, never end-user input — they live in the
+ *  backend's OAuth provider config (see
+ *  HRAgent_Main/mcp_integration/oauth_provider_config.py) and are never sent
+ *  to or requested by the frontend. */
 export interface SetupAuthConfig {
   /** "oauth2" → Connect-with-… flow; "token" → one secret field; "env" → fields only; "none". */
   method: "oauth2" | "token" | "env" | "none"
   label?: string
   /** For method="token": the ${VAR} name the value substitutes into. */
   token_field?: string
-  /** For method="oauth2": optional client id/secret field names. */
-  client_id?: string
-  client_secret?: string
   hint?: string
-  /** For method="oauth2": the fixed local callback URL the provider's app
-   *  registration must allow, e.g. "http://localhost:8765/callback".
-   *  Backend-injected from a single source of truth — always present when
-   *  client_id/client_secret request a pre-registered app. */
-  redirect_uri?: string
+  /** For method="oauth2": the backend OAuth provider (e.g. "google",
+   *  "slack") this integration's app credentials come from. Absent when the
+   *  provider needs no pre-registered app (dynamic client registration,
+   *  e.g. Linear/Jira) — those are always ready to connect. */
+  provider?: string
+  /** For method="oauth2" with `provider` set: whether an administrator has
+   *  configured that provider's app credentials on the backend. False means
+   *  Connect must be blocked with a clear "needs backend configuration"
+   *  message instead of attempting (and failing) dynamic client
+   *  registration against a provider that doesn't support it. */
+  provider_configured?: boolean
   /** For method="oauth2": a safe read-only tool to invoke once tools are
    *  listed, so servers that only gate individual tool calls (not
    *  tools/list) still trigger a real auth challenge during setup instead

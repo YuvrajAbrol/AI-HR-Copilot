@@ -103,11 +103,14 @@ export function McpSetupDialog({
   // of only failing after a click.
   const canSave = schema ? setupComplete(schema, setup.values, setup.oauthState, oauthAlready) : false
 
-  const handleConnectOAuth = async (clientId?: string, clientSecret?: string) => {
+  const handleConnectOAuth = async () => {
     if (!firstTemplate) return null
     const spec = templateToProbeSpec(firstTemplate, setup.values)
     if (!spec) return null
-    return startOAuth(spec, { clientId, clientSecret, verifyToolCall: schema?.auth?.verify_tool_call })
+    // No client_id/secret here — those are backend deployment config (see
+    // oauth_provider_config.py), resolved server-side from the template's
+    // `provider` tag. The frontend only ever asks the provider to connect.
+    return startOAuth(spec, { verifyToolCall: schema?.auth?.verify_tool_call })
   }
 
   /* Persist the completed session into this server's config the moment the
@@ -179,25 +182,11 @@ export function McpSetupDialog({
         }
       }
 
-      // 2) OAuth: keep the completed session (if not already persisted by the
-      //    completion callback) and store the client id/secret so re-auth can
-      //    reuse them.
-      if (isOAuth && schema?.auth) {
-        const envPatch: Record<string, string | null> = {}
-        const { client_id, client_secret } = schema.auth
-        for (const clientField of [client_id, client_secret]) {
-          if (clientField && typeof setup.values[clientField] === "string") {
-            envPatch[clientField] = setup.values[clientField] as string
-          }
-        }
-        if (Object.keys(envPatch).length > 0) {
-          await patchServerConfig(connection.id, { env: envPatch })
-          persisted = true
-        }
-        if (setup.oauthState) {
-          await patchServerConfig(connection.id, { auth: { strategy: "oauth2", state: setup.oauthState } })
-          persisted = true
-        }
+      // 2) OAuth: keep the completed session (if not already persisted by
+      //    the completion callback).
+      if (isOAuth && setup.oauthState) {
+        await patchServerConfig(connection.id, { auth: { strategy: "oauth2", state: setup.oauthState } })
+        persisted = true
       }
 
       if (!persisted && connection.setupNeeded) {

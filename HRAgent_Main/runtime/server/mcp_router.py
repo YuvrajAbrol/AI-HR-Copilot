@@ -20,6 +20,7 @@ persist it through the settings API under the tested server's ``auth.state``.
 from __future__ import annotations
 
 import asyncio
+import socket
 import time
 import uuid
 from dataclasses import dataclass, field as dataclass_field
@@ -45,6 +46,7 @@ from mcp_integration.config import (
     stamp_absolute_token_expiry,
 )
 from mcp_integration.exceptions import MCPError, MCPTimeoutError
+from mcp_integration.oauth_provider_config import get_oauth_provider_credentials
 from runtime.server._secrets_exposure import get_cipher
 from runtime.server.mcp_oauth_store import InMemoryMCPOAuthTokenStore
 from runtime.telemetry.logger import get_logger
@@ -465,6 +467,30 @@ _OAUTH_START_WAIT_SECONDS = 3.0
 _OAUTH_CALLBACK_PORT = MCP_OAUTH_CALLBACK_PORT
 
 OAuthJobStatus = Literal["pending", "authorizing", "succeeded", "failed"]
+# "not_configured": the integration needs a backend-configured OAuth provider
+# app (see mcp_integration.oauth_provider_config) that hasn't been set up.
+# "cancelled": superseded by a newer OAuth attempt (see _supersede_active_oauth_job)
+# or explicitly cancelled. Distinct from "connection"/"timeout"/"unknown" so
+# the UI can say exactly what happened instead of a generic OAuth failure.
+OAuthErrorKind = Literal[
+    "timeout", "connection", "not_configured", "cancelled", "port_busy", "unknown"
+]
+
+
+class MCPOAuthProviderNotConfiguredError(Exception):
+    """Raised when an integration needs a backend OAuth provider app that
+    has no credentials configured (see ``oauth_provider_config``)."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        super().__init__(
+            f"This integration requires a {provider!r} OAuth application "
+            "configured on the backend, but none was found. An "
+            f"administrator must add a {provider!r} entry to "
+            "~/.HRAgent/oauth_providers.json (see "
+            "config/oauth_providers.example.json) before this integration "
+            "can be connected."
+        )
 
 
 @dataclass
@@ -475,22 +501,117 @@ class _OAuthJob:
     tools: list[MCPTestToolInfo] | None = None
     oauth_state: MCPOAuthState | None = None
     error: str | None = None
-    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+    error_kind: OAuthErrorKind | None = None
     created_at: float = dataclass_field(default_factory=time.time)
     updated: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    # The connection/server this job authorizes, used to prevent two jobs
+    # racing for the same server (they'd fight over the shared callback
+    # port) and to let a fresh Connect/Re-authenticate click supersede a
+    # stale one instead of just piling up forever. None for ad hoc probes
+    # (e.g. the "Add custom server" dialog) that aren't tied to a saved
+    # connection.
+    server_key: str | None = None
+    cancelled: bool = False
 
 
 _OAUTH_JOBS: dict[str, _OAuthJob] = {}
 _OAUTH_TASKS: dict[str, asyncio.Task[None]] = {}
 
 
-def _prune_oauth_jobs() -> None:
+async def _prune_oauth_jobs() -> None:
+    """Drop expired jobs, waiting for any still-running task to actually
+    unwind (see _cancel_oauth_job) rather than firing a cancel and moving
+    on -- a stale job's callback server can otherwise still be mid-shutdown
+    when the very next call starts a new one on the same port.
+    """
     cutoff = time.time() - _OAUTH_JOB_TTL_SECONDS
-    for job_id in [jid for jid, job in _OAUTH_JOBS.items() if job.created_at < cutoff]:
+    expired_ids = [jid for jid, job in _OAUTH_JOBS.items() if job.created_at < cutoff]
+    for job_id in expired_ids:
+        await _cancel_oauth_job(job_id, reason="Expired.")
         _OAUTH_JOBS.pop(job_id, None)
-        task = _OAUTH_TASKS.pop(job_id, None)
-        if task is not None and not task.done():
-            task.cancel()
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
+async def _wait_for_port_release(port: int, *, timeout: float) -> bool:
+    """Poll until ``port`` can be bound again, or ``timeout`` elapses.
+
+    FastMCP's OAuth callback server only gives its own uvicorn instance a
+    100ms grace period to shut down before force-cancelling it (see
+    ``fastmcp.client.auth.oauth.OAuth.callback_handler``), which is often not
+    enough time for the socket to actually close. A caller that starts a new
+    callback server on the same port before it's released hits uvicorn's own
+    ``Server.startup()`` bind failure, which calls ``sys.exit(1)`` -- raising
+    ``SystemExit`` right out of the new job (see ``_classify_oauth_error``'s
+    "port_busy" case). Waiting here, actively confirming the port is free
+    rather than guessing a fixed delay, makes that far less likely.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if await asyncio.to_thread(_port_is_free, port):
+            return True
+        await asyncio.sleep(0.15)
+    return False
+
+
+async def _cancel_oauth_job(
+    job_id: str, *, reason: str, error_kind: OAuthErrorKind = "cancelled"
+) -> None:
+    """Cancel a job's background task and wait for it to actually finish
+    unwinding -- including releasing the shared OAuth callback port --
+    before returning.
+
+    A fire-and-forget ``task.cancel()`` schedules cancellation but returns
+    immediately -- the coroutine (and whatever it holds, notably the shared
+    OAuth callback port) may not have released its resources yet. A caller
+    that immediately starts a *new* job on the same port can then lose that
+    race and crash the new job (or worse -- see the SystemExit handling in
+    _run_oauth_job). Awaiting the cancelled task, then actively confirming
+    the port is free, closes that window.
+    """
+    job = _OAUTH_JOBS.get(job_id)
+    task = _OAUTH_TASKS.pop(job_id, None)
+    if job is not None and job.status in ("pending", "authorizing"):
+        job.cancelled = True
+        job.status = "failed"
+        job.error = reason
+        job.error_kind = error_kind
+        job.updated.set()
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=5.0)
+    except asyncio.CancelledError:
+        pass  # expected: this is exactly what we just requested
+    except TimeoutError:
+        logger.warning(
+            "MCP OAuth job %s did not finish unwinding within 5s of "
+            "cancellation",
+            job_id,
+        )
+    except Exception:
+        # The task's own cleanup raised something else while unwinding.
+        # Already logged (if it got that far) inside _run_oauth_job's own
+        # except block; nothing more to do here.
+        pass
+
+    if not await _wait_for_port_release(_OAUTH_CALLBACK_PORT, timeout=10.0):
+        logger.warning(
+            "MCP OAuth job %s: callback port %d still in use 10s after "
+            "cancellation -- the next job to start may fail with "
+            "'port_busy' until it clears.",
+            job_id,
+            _OAUTH_CALLBACK_PORT,
+        )
 
 
 class _JobOAuth(FastMCPOAuth):
@@ -516,7 +637,16 @@ class _JobOAuth(FastMCPOAuth):
         self._job.updated = asyncio.Event()
 
 
-def _classify_oauth_error(exc: Exception) -> Literal["timeout", "connection", "unknown"]:
+def _classify_oauth_error(exc: BaseException) -> OAuthErrorKind:
+    if isinstance(exc, MCPOAuthProviderNotConfiguredError):
+        return "not_configured"
+    if isinstance(exc, SystemExit):
+        # Uvicorn's own Server.startup() calls sys.exit(1) on a bind
+        # failure -- the shared OAuth callback port (see
+        # MCP_OAUTH_CALLBACK_PORT) is still held by a job that hasn't
+        # finished releasing it yet, most often right after cancelling a
+        # previous one. See _cancel_oauth_job's port-release wait.
+        return "port_busy"
     if isinstance(exc, TimeoutError):
         return "timeout"
     if isinstance(exc, (MCPError, httpx.HTTPError, OSError, ConnectionError)):
@@ -544,14 +674,38 @@ async def _run_oauth_job(
         scopes = auth_meta.scopes if auth_meta else None
         client_name = (auth_meta.client_name if auth_meta else None) or "HRAgent"
         additional_metadata = dict(auth_meta.additional_client_metadata or {}) if auth_meta else {}
+
+        # Resolve the pre-registered app credentials this provider needs.
+        # ``provider`` (set on the integration's .mcp.json template, never
+        # by the frontend) names an entry in the backend-only OAuth provider
+        # config -- see mcp_integration/oauth_provider_config.py. A caller-
+        # supplied client_id (legacy/custom servers) still wins if present,
+        # but nothing in the current marketplace catalog sends one anymore.
+        client_id: str | None = auth_meta.client_id if auth_meta else None
+        client_secret: str | None = (
+            auth_meta.client_secret.get_secret_value()
+            if auth_meta and auth_meta.client_secret is not None
+            else None
+        )
+        if not client_id and auth_meta and auth_meta.provider:
+            provider_creds = get_oauth_provider_credentials(auth_meta.provider)
+            if provider_creds is None:
+                raise MCPOAuthProviderNotConfiguredError(auth_meta.provider)
+            client_id = provider_creds.client_id
+            client_secret = (
+                provider_creds.client_secret.get_secret_value()
+                if provider_creds.client_secret is not None
+                else None
+            )
+
         # Dynamically-registered MCP clients are public (PKCE-only, no
         # client_secret) unless a pre-registered confidential client_id was
-        # supplied below. Without this, some authorization servers (e.g.
+        # resolved above. Without this, some authorization servers (e.g.
         # Linear) register a confidential client by default, and the later
         # token exchange -- which always sends the PKCE code_verifier --
         # gets rejected with "must not use multiple authentication methods"
         # because it also carries client credentials.
-        if not (auth_meta is not None and auth_meta.client_id):
+        if not client_id:
             additional_metadata.setdefault("token_endpoint_auth_method", "none")
 
         token_store = InMemoryMCPOAuthTokenStore()
@@ -572,18 +726,13 @@ async def _run_oauth_job(
         )
 
         # Providers that don't support dynamic client registration (e.g.
-        # Google) require a pre-registered client id/secret; when supplied,
-        # seed it directly so OAuthClientProvider skips DCR.
-        if auth_meta is not None and auth_meta.client_id:
-            client_secret_value = (
-                auth_meta.client_secret.get_secret_value()
-                if auth_meta.client_secret is not None
-                else None
-            )
+        # Google) require a pre-registered client id/secret; when resolved
+        # above, seed it directly so OAuthClientProvider skips DCR.
+        if client_id:
             await job_oauth.token_storage_adapter.set_client_info(
                 OAuthClientInformationFull(
-                    client_id=auth_meta.client_id,
-                    client_secret=client_secret_value,
+                    client_id=client_id,
+                    client_secret=client_secret,
                     redirect_uris=[f"http://localhost:{job_oauth.redirect_port}/callback"],
                     grant_types=["authorization_code", "refresh_token"],
                     response_types=["code"],
@@ -594,7 +743,7 @@ async def _run_oauth_job(
                     # exchange entirely ("client_secret is missing", even
                     # though we have one).
                     token_endpoint_auth_method=(
-                        "client_secret_post" if client_secret_value else "none"
+                        "client_secret_post" if client_secret else "none"
                     ),
                 )
             )
@@ -673,7 +822,13 @@ async def _run_oauth_job(
             )
         job.oauth_state = oauth_state
         job.status = "succeeded"
-    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
+        # SystemExit (not a normal Exception -- must be listed explicitly)
+        # is what uvicorn's Server.startup() raises when it can't bind the
+        # shared OAuth callback port. Left uncaught, it propagates out of
+        # this background task as an unhandled BaseException, which can take
+        # the whole server process down with it instead of just failing this
+        # one job -- see MCP_OAUTH_CALLBACK_PORT and _cancel_oauth_job.
         if job.status == "succeeded":
             # The real work (auth handshake + verification call) already
             # completed inside the `async with` block; this exception is
@@ -715,7 +870,7 @@ class OAuthStartResponse(BaseModel):
     job_id: str | None = None
     authorization_url: str | None = None
     error: str | None = None
-    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+    error_kind: OAuthErrorKind | None = None
 
 
 class OAuthStatusResponse(BaseModel):
@@ -727,7 +882,7 @@ class OAuthStatusResponse(BaseModel):
     tools: list[MCPTestToolInfo] | None = None
     oauth_state: MCPOAuthStateResponse | None = None
     error: str | None = None
-    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+    error_kind: OAuthErrorKind | None = None
 
 
 @mcp_router.post(
@@ -743,7 +898,7 @@ class OAuthStatusResponse(BaseModel):
     ),
 )
 async def start_mcp_oauth(request: MCPTestRequest, http_request: Request) -> OAuthStartResponse:
-    _prune_oauth_jobs()
+    await _prune_oauth_jobs()
     cipher = get_cipher(http_request)
     server = request.resolved_server
     if server.oauth_auth is None:
@@ -752,8 +907,80 @@ async def start_mcp_oauth(request: MCPTestRequest, http_request: Request) -> OAu
             detail="server.auth.strategy must be 'oauth2' to start an OAuth job",
         )
 
+    # A duplicate Connect click, a Re-authenticate fired while the first
+    # attempt is still pending, or a stale dialog re-submitting -- all just
+    # want the *same* authorization to still be in flight, not a fresh one.
+    # Reuse the existing job instead of cancelling and rebinding the shared
+    # callback port: that path is unreliable (fastmcp's own callback server
+    # can take far longer than its own 100ms shutdown grace period to
+    # actually release the port -- see _cancel_oauth_job) and was the
+    # original source of the SystemExit crash this endpoint now also
+    # defends against below.
+    for existing_id, existing_job in _OAUTH_JOBS.items():
+        if existing_job.server_key == server.url and existing_job.status in (
+            "pending",
+            "authorizing",
+        ):
+            return OAuthStartResponse(
+                ok=True, job_id=existing_id, authorization_url=existing_job.authorization_url
+            )
+
+    # A *different* server's job is still active. We do need the port, but
+    # empirically cancelling it and waiting for the release is unreliable --
+    # fastmcp's callback server can take far longer than its own 100ms
+    # shutdown grace period to actually free the socket when cancelled
+    # externally (see _cancel_oauth_job), sometimes not within tens of
+    # seconds. Rather than block the caller that long only to often fail
+    # anyway, fail fast with an honest, actionable message: attempt the
+    # cancellation in the background (best-effort, so the port is more
+    # likely free by the time the user retries) and tell the caller
+    # immediately instead of making them wait to find out.
+    active = next(
+        (
+            (jid, job)
+            for jid, job in _OAUTH_JOBS.items()
+            if job.status in ("pending", "authorizing")
+        ),
+        None,
+    )
+    if active is not None:
+        active_id, active_job = active
+        asyncio.create_task(
+            _cancel_oauth_job(
+                active_id,
+                reason="Superseded by a newer OAuth attempt for a different server.",
+            )
+        )
+        return OAuthStartResponse(
+            ok=False,
+            error=(
+                "Another OAuth authorization is already in progress for a "
+                f"different server ({active_job.server_key or 'unknown'}). "
+                "It's being cancelled now -- wait a few seconds and try "
+                "connecting again."
+            ),
+            error_kind="port_busy",
+        )
+
+    # Defense in depth even when there was no active job to preempt: a
+    # previous job's own internal 5-minute timeout can fire (or its uvicorn
+    # callback server can still be mid-shutdown) without ever going through
+    # _cancel_oauth_job. Confirm the port is actually free rather than
+    # finding out via a crashed job (see _classify_oauth_error's
+    # "port_busy" case).
+    if not await _wait_for_port_release(_OAUTH_CALLBACK_PORT, timeout=8.0):
+        return OAuthStartResponse(
+            ok=False,
+            error=(
+                f"The OAuth callback port ({_OAUTH_CALLBACK_PORT}) is still "
+                "in use by a previous authorization attempt. Please wait a "
+                "moment and try again."
+            ),
+            error_kind="port_busy",
+        )
+
     job_id = uuid.uuid4().hex
-    job = _OAuthJob()
+    job = _OAuthJob(server_key=server.url)
     _OAUTH_JOBS[job_id] = job
     _OAUTH_TASKS[job_id] = asyncio.create_task(
         _run_oauth_job(job_id, server, cipher, request.tool_call)
@@ -802,6 +1029,31 @@ async def mcp_oauth_status(job_id: str) -> OAuthStatusResponse:
             and job.oauth_state.tokens.access_token is not None
             else None
         ),
+        error=job.error,
+        error_kind=job.error_kind,
+    )
+
+
+@mcp_router.post(
+    "/oauth/status/{job_id}/cancel",
+    response_model=OAuthStatusResponse,
+    response_model_exclude_none=True,
+    summary="Cancel a pending MCP OAuth authorization job",
+    description=(
+        "Cancels an in-flight OAuth job (e.g. the user closed the setup "
+        "dialog, or gave up on a stuck consent screen) and releases the "
+        "shared callback port. Safe to call on an already-finished job."
+    ),
+)
+async def cancel_mcp_oauth(job_id: str) -> OAuthStatusResponse:
+    job = _OAUTH_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown or expired OAuth job")
+    await _cancel_oauth_job(job_id, reason="Cancelled by the user.")
+    return OAuthStatusResponse(
+        ok=False,
+        status=job.status,
+        job_id=job_id,
         error=job.error,
         error_kind=job.error_kind,
     )

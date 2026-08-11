@@ -8,6 +8,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Check,
+  KeyRound,
   Plus,
   Settings,
 } from "lucide-react"
@@ -854,24 +855,33 @@ export function MarketplaceSkillCard({
 }
 
 /* Large marketplace MCP server card — matches the reference screenshot style. */
+/** Real backend/plugin-config state, not a frontend guess:
+ *  "not-installed" → the integration isn't installed at all yet.
+ *  "needs-setup" → installed, but at least one of its servers still needs
+ *    credentials or an OAuth session (McpConnection.setupNeeded).
+ *  "connected" → installed and every one of its servers is authenticated. */
+export type McpCardStatus = "not-installed" | "needs-setup" | "connected"
+
 export function MarketplaceMcpCard({
   icon: Icon,
   name,
   description,
   category,
   serverType,
-  installed,
+  status,
   onInstall,
   onConfigure,
+  onManage,
 }: {
   icon: LucideIcon
   name: string
   description: string
   category: string
   serverType: string
-  installed: boolean
+  status: McpCardStatus
   onInstall: () => void
   onConfigure?: () => void
+  onManage?: () => void
 }) {
   const tone = CATEGORY_TONES[category] ?? "border-border/60 bg-secondary/60 text-foreground"
 
@@ -900,16 +910,34 @@ export function MarketplaceMcpCard({
       </div>
       <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-2">{description}</p>
       <div className="flex items-center justify-end">
-        {installed ? (
+        {status === "connected" ? (
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-[12px] font-medium text-emerald-400">
+              <Check className="h-3.5 w-3.5" />
+              Connected
+            </span>
+            {(onManage ?? onConfigure) && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onManage ?? onConfigure}
+                className="gap-1.5 text-muted-foreground transition-transform duration-150 active:scale-95"
+              >
+                <Settings className="h-3.5 w-3.5" />
+                Manage
+              </Button>
+            )}
+          </div>
+        ) : status === "needs-setup" ? (
           onConfigure ? (
             <Button
               size="sm"
               variant="secondary"
               onClick={onConfigure}
-              className="gap-1.5 border border-border/60 transition-transform duration-150 active:scale-95"
+              className="gap-1.5 border border-amber-500/25 bg-amber-500/10 text-amber-300 transition-transform duration-150 hover:bg-amber-500/15 hover:text-amber-200 active:scale-95"
             >
-              <Settings className="h-3.5 w-3.5" />
-              Configure
+              <KeyRound className="h-3.5 w-3.5" />
+              Connect
             </Button>
           ) : (
             <InstalledPill />
@@ -922,7 +950,7 @@ export function MarketplaceMcpCard({
             className="gap-1.5 border border-border/60 transition-transform duration-150 active:scale-95"
           >
             <Plus className="h-3.5 w-3.5" />
-            Activate
+            Install
           </Button>
         )}
       </div>

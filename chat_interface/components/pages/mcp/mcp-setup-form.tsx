@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Check, CheckCircle2, Copy, ExternalLink, Eye, EyeOff, Loader2, ShieldCheck, Sparkles, Zap } from "lucide-react"
+import { AlertTriangle, CheckCircle2, ExternalLink, Eye, EyeOff, Loader2, ShieldCheck, Sparkles, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
@@ -81,39 +81,12 @@ function HintBanner({ text }: { text: string }) {
   )
 }
 
-/** A read-only value the user copies into a third-party provider's app
- *  registration form (e.g. an OAuth redirect/callback URL). */
-function CopyableValue({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false)
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(value)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      /* clipboard unavailable — no-op */
-    }
-  }
-  return (
-    <div className="flex flex-col gap-2">
-      <Label className="text-[13px] font-medium text-foreground">{label}</Label>
-      <div className="flex items-center gap-2 rounded-md border border-border/60 bg-secondary/40 px-3 py-2">
-        <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-foreground">{value}</code>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
-          aria-label="Copy to clipboard"
-        >
-          {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
-        </button>
-      </div>
-    </div>
-  )
-}
-
 /* ------------------------------------------------------------------ */
 /*  Schema field renderer (text / password / textarea / select / bool) */
+/*  Only ever used for genuinely user-owned values now: a personal     */
+/*  access token, or a per-deployment connection string. OAuth app     */
+/*  credentials never reach this — see provider/provider_configured    */
+/*  on SetupAuthConfig.                                                */
 /* ------------------------------------------------------------------ */
 
 export function SetupFields({
@@ -203,19 +176,11 @@ export function SetupFields({
 function authOwnedFieldNames(schema: McpSetupSchema): Set<string> {
   const auth = schema.auth
   const names = new Set<string>()
-  if (!auth) return names
-  if (auth.method === "token" && auth.token_field) names.add(auth.token_field)
-  if (auth.method === "oauth2") {
-    if (auth.client_id) names.add(auth.client_id)
-    if (auth.client_secret) names.add(auth.client_secret)
-  }
+  if (auth?.method === "token" && auth.token_field) names.add(auth.token_field)
   return names
 }
 
-/** Whether every field the schema marks `required` has a non-empty value.
- *  Used both to gate the OAuth Connect button (required app credentials
- *  must exist before a doomed auth attempt starts) and, combined with the
- *  auth-specific checks below, to gate Save. */
+/** Whether every field the schema marks `required` has a non-empty value. */
 function requiredFieldsFilled(fields: SetupField[] | undefined, values: Record<string, string | boolean>): boolean {
   for (const field of fields ?? []) {
     if (!field.required) continue
@@ -246,8 +211,8 @@ export function authSatisfied(
   return true
 }
 
-/** True once every schema-required field (auth fields included) is filled
- *  and, for OAuth, the session is connected. Drives the Save button. */
+/** True once every schema-required field is filled and, for OAuth, the
+ *  session is connected. Drives the Save button. */
 export function setupComplete(
   schema: McpSetupSchema,
   values: Record<string, string | boolean>,
@@ -260,28 +225,26 @@ export function setupComplete(
   )
 }
 
-/** True once every field the OAuth provider's app registration needs
- *  (client_id / client_secret, when the schema marks them required) is
- *  filled — gates the Connect button so it never kicks off a doomed
- *  auth attempt against a provider that requires a pre-registered app. */
-function oauthAppReady(schema: McpSetupSchema, values: Record<string, string | boolean>): boolean {
+/** True when this OAuth integration is actually connectable: either it
+ *  needs no pre-registered app (dynamic client registration) or the
+ *  backend has one configured. False means an administrator still needs
+ *  to add this provider to the backend's OAuth provider config — Connect
+ *  must be blocked with that message instead of attempting (and failing)
+ *  DCR against a provider that doesn't support it. */
+export function oauthProviderReady(schema: McpSetupSchema): boolean {
   const auth = schema.auth
   if (!auth || auth.method !== "oauth2") return true
-  const fieldByName = new Map((schema.fields ?? []).map((f) => [f.name, f]))
-  for (const name of [auth.client_id, auth.client_secret]) {
-    if (!name) continue
-    const field = fieldByName.get(name)
-    if (field?.required && !String(values[name] ?? "").trim()) return false
-  }
-  return true
+  if (!auth.provider) return true
+  return auth.provider_configured === true
 }
 
 /* ------------------------------------------------------------------ */
 /*  Full per-integration setup form                                    */
-/*  Renders one consistent structure for every integration: an "App     */
-/*  credentials" step when the OAuth provider needs a pre-registered    */
-/*  app, an "Authenticate" step (token or OAuth connect), then any      */
-/*  remaining schema fields — instead of a different layout per MCP.    */
+/*  Renders one consistent structure for every integration. OAuth app   */
+/*  credentials are never collected here — they're backend deployment   */
+/*  configuration (see oauth_provider_config.py); this form only ever   */
+/*  asks for values that belong to the person setting it up: a personal */
+/*  access token, or a per-deployment connection string.                */
 /* ------------------------------------------------------------------ */
 
 export function McpSetupForm({
@@ -300,7 +263,7 @@ export function McpSetupForm({
   oauthConnected?: boolean
   disabled?: boolean
   /** Start the OAuth flow for this integration; resolves with the job id. */
-  onConnectOAuth?: (clientId?: string, clientSecret?: string) => Promise<string | null>
+  onConnectOAuth?: () => Promise<string | null>
   /** Poll an OAuth job; the success callback receives the persisted session. */
   onCompleteOAuth?: (jobId: string, onSuccess?: (state: Record<string, unknown>) => void) => Promise<"ok" | "failed">
   /** Emitted on every change so the caller can provision with current values. */
@@ -318,6 +281,7 @@ export function McpSetupForm({
   const [reauthing, setReauthing] = useState(false)
 
   const connected = (oauthState !== null || oauthConnected) && !reauthing
+  const providerReady = oauthProviderReady(schema)
 
   const emit = (next: Record<string, string | boolean>, state: Record<string, unknown> | null = oauthState) =>
     onValues?.({ values: next, oauthState: state, isOAuth })
@@ -334,18 +298,12 @@ export function McpSetupForm({
     emit(values, state)
   }
 
-  const clientIdValue = auth?.client_id && typeof values[auth.client_id] === "string" ? (values[auth.client_id] as string) : undefined
-  const clientSecretValue =
-    auth?.client_secret && typeof values[auth.client_secret] === "string" ? (values[auth.client_secret] as string) : undefined
-
-  const appReady = oauthAppReady(schema, values)
-
   const handleConnect = async () => {
-    if (!onConnectOAuth || oauthBusy || connected || !appReady) return
+    if (!onConnectOAuth || oauthBusy || connected || !providerReady) return
     setOauthBusy(true)
     setOauthStarted(true)
     try {
-      const jobId = await onConnectOAuth(clientIdValue, clientSecretValue)
+      const jobId = await onConnectOAuth()
       if (!jobId) {
         setOauthBusy(false)
         return
@@ -358,33 +316,11 @@ export function McpSetupForm({
     }
   }
 
-  // Fields the auth block already renders (client id/secret, token) are
-  // excluded from the trailing generic fields list so nothing shows twice.
   const ownedNames = authOwnedFieldNames(schema)
-  const appCredentialFields = (schema.fields ?? []).filter((f) => f.name === auth?.client_id || f.name === auth?.client_secret)
   const remainingFields = (schema.fields ?? []).filter((f) => !ownedNames.has(f.name))
 
   return (
     <div className="flex flex-col gap-5">
-      {/* --- step: provider app registration (OAuth needing a pre-registered app) --- */}
-      {isOAuth && (auth?.client_id || auth?.redirect_uri) && (
-        <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-secondary/20 p-4">
-          <div className="flex items-center gap-2">
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-semibold text-foreground">
-              1
-            </span>
-            <p className="text-[13px] font-semibold text-foreground">Provider app</p>
-          </div>
-          {auth.hint && <p className="pl-7 text-xs leading-relaxed text-muted-foreground">{auth.hint}</p>}
-          <div className="flex flex-col gap-4 pl-7">
-            {auth.redirect_uri && <CopyableValue label="Redirect / callback URL" value={auth.redirect_uri} />}
-            {appCredentialFields.length > 0 && (
-              <SetupFields fields={appCredentialFields} values={values} onChange={handleValues} disabled={disabled || connected} />
-            )}
-          </div>
-        </div>
-      )}
-
       {/* --- step: authenticate (token field or OAuth connect) --- */}
       {auth?.method === "token" && auth.token_field && (
         <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-secondary/20 p-4">
@@ -408,21 +344,30 @@ export function McpSetupForm({
         </div>
       )}
 
+      {isOAuth && !providerReady && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+          <div className="min-w-0">
+            <p className="text-[13px] font-medium text-amber-300">Needs administrator setup</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-amber-300/80">
+              This integration requires a {auth?.provider} OAuth application configured on the
+              backend before anyone can connect. Ask your administrator to add it to the server's
+              OAuth provider configuration.
+            </p>
+          </div>
+        </div>
+      )}
+
       {isOAuth && (
         <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-secondary/20 p-4">
-          <div className="flex items-center gap-2">
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-semibold text-foreground">
-              {auth?.client_id || auth?.redirect_uri ? 2 : 1}
-            </span>
-            <p className="text-[13px] font-semibold text-foreground">Connect</p>
-          </div>
-          <div className="flex items-center justify-between gap-3 pl-7">
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">{auth?.label ?? "Connect"}</p>
               <p className="truncate text-xs text-muted-foreground">
                 {connected ? (
                   <span className="flex items-center gap-1 text-emerald-400">
                     <ShieldCheck className="h-3 w-3" />
-                    OAuth session saved for this server
+                    Connected
                   </span>
                 ) : oauthBusy ? (
                   <span className="flex items-center gap-1">
@@ -431,10 +376,10 @@ export function McpSetupForm({
                   </span>
                 ) : oauthStarted ? (
                   "Open the provider tab and approve access."
-                ) : !appReady ? (
-                  "Fill in the app credentials above first."
+                ) : !providerReady ? (
+                  "Not available until an administrator configures this integration."
                 ) : (
-                  "Authorize this integration to reach your account."
+                  auth?.hint ?? "Authorize this integration to reach your account."
                 )}
               </p>
             </div>
@@ -462,11 +407,11 @@ export function McpSetupForm({
                 type="button"
                 variant="secondary"
                 onClick={handleConnect}
-                disabled={oauthBusy || disabled || !appReady}
+                disabled={oauthBusy || disabled || !providerReady}
                 className="gap-2 border border-border/60 bg-secondary/60 hover:bg-secondary"
               >
                 {oauthBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
-                {auth?.label ?? "Connect"}
+                Connect
               </Button>
             )}
           </div>
@@ -482,7 +427,7 @@ export function McpSetupForm({
 
       {auth?.method === "env" && auth.hint && <HintBanner text={auth.hint} />}
 
-      {/* --- remaining schema fields (env values, optional overrides, …) --- */}
+      {/* --- remaining schema fields (env values, connection strings, …) --- */}
       {remainingFields.length > 0 && (
         <div className="flex flex-col gap-3">
           {(isOAuth || auth?.method === "token") && (

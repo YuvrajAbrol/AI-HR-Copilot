@@ -362,12 +362,12 @@ interface McpContextValue {
   /** Install a marketplace integration and provision its servers into mcp_config.
    *  Resolves with the provisioned per-server configs (merged), or null on failure. */
   installAndProvision: (lib: LibraryServer, setup: McpSetupValues) => Promise<Record<string, mcpApi.McpServerConfig> | null>
-  /** Start a browser-coordinated OAuth flow against a probe spec; returns job_id. */
+  /** Start a browser-coordinated OAuth flow against a probe spec; returns
+   *  job_id. Never takes client id/secret — those are backend deployment
+   *  config (see oauth_provider_config.py), resolved server-side. */
   startOAuth: (
     spec: mcpApi.McpTestServerSpec,
     opts?: {
-      clientId?: string
-      clientSecret?: string
       verifyToolCall?: { name: string; arguments?: Record<string, unknown> }
     },
   ) => Promise<string | null>
@@ -632,17 +632,6 @@ export function McpProvider({ children }: { children: ReactNode }) {
           const server = JSON.parse(JSON.stringify(template)) as mcpApi.McpServerConfig
           substitutePlaceholders(server as unknown as Record<string, unknown>, setup.values)
 
-          // OAuth client id/secret: keep them per-server in env even though the
-          // template never references them by ${VAR} (they feed the OAuth flow).
-          if (setup.isOAuth && lib.setup?.auth) {
-            const { client_id, client_secret } = lib.setup.auth
-            for (const clientField of [client_id, client_secret]) {
-              if (clientField && typeof setup.values[clientField] === "string") {
-                server.env = { ...(server.env ?? {}), [clientField]: setup.values[clientField] as string }
-              }
-            }
-          }
-
           // Persist a completed OAuth session into the server's auth.state.
           if (setup.oauthState) {
             server.auth = { strategy: "oauth2", state: setup.oauthState }
@@ -683,18 +672,20 @@ export function McpProvider({ children }: { children: ReactNode }) {
     async (
       spec: mcpApi.McpTestServerSpec,
       opts?: {
-        clientId?: string
-        clientSecret?: string
         verifyToolCall?: { name: string; arguments?: Record<string, unknown> }
       },
     ) => {
-      const auth: Record<string, unknown> = { strategy: "oauth2" }
-      if (opts?.clientId) {
-        auth.authentication = { type: "oauth", client_id: opts.clientId, client_secret: opts.clientSecret ?? "" }
-      } else {
-        auth.authentication = { type: "oauth" }
-      }
-      spec.auth = auth as NonNullable<mcpApi.McpServerConfig["auth"]>
+      // Preserve the template's existing `authentication` (notably
+      // `provider`, e.g. "google" -- how the backend resolves which
+      // deployment-configured OAuth app to use, see
+      // oauth_provider_config.py) rather than replacing it outright. The
+      // frontend never supplies client_id/secret itself.
+      const existingAuth = (spec.auth ?? {}) as Record<string, unknown>
+      const existingAuthentication = (existingAuth.authentication ?? {}) as Record<string, unknown>
+      spec.auth = {
+        strategy: "oauth2",
+        authentication: { ...existingAuthentication, type: "oauth" },
+      } as NonNullable<mcpApi.McpServerConfig["auth"]>
       try {
         const res = await mcpApi.oauthStart({
           server: spec,

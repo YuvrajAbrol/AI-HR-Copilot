@@ -215,3 +215,9 @@ tests/integration/api_compliance/outputs/
 
 # Agent-generated temp
 .agent_tmp/
+
+# Backend-only OAuth provider app credentials (see
+# mcp_integration/oauth_provider_config.py). Real deployments should use
+# ~/.HRAgent/oauth_providers.json instead of a repo-relative path, but this
+# guards against someone dropping a real file here by mistake.
+config/oauth_providers.json

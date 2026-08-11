@@ -6,7 +6,8 @@
       "auth": {
         "strategy": "oauth2",
         "authentication": {
-          "type": "oauth"
+          "type": "oauth",
+          "provider": "google"
         }
       }
     }

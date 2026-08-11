@@ -22,7 +22,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from runtime.telemetry.logger import get_logger
-from mcp_integration.config import MCP_OAUTH_REDIRECT_URI
+from mcp_integration.oauth_provider_config import configured_oauth_providers
 from plugins.marketplace import Marketplace
 from plugins import (
     InstalledPluginInfo,
@@ -438,21 +438,42 @@ def _load_bundled_marketplace() -> Marketplace | None:
         return None
 
 
-def _with_oauth_redirect_uri(setup: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Stamp the fixed OAuth callback redirect URI onto an oauth2 setup schema.
+def _oauth_provider_of(servers: dict[str, Any] | None) -> str | None:
+    """The backend OAuth provider (see ``oauth_provider_config``) an
+    integration's ``.mcp.json`` template declares, if any."""
+    if not isinstance(servers, dict):
+        return None
+    for server_cfg in servers.values():
+        if not isinstance(server_cfg, dict):
+            continue
+        auth = server_cfg.get("auth")
+        authentication = auth.get("authentication") if isinstance(auth, dict) else None
+        provider = authentication.get("provider") if isinstance(authentication, dict) else None
+        if isinstance(provider, str) and provider:
+            return provider
+    return None
 
-    Every integration's ``plugin.json`` used to duplicate this value as
-    static prose in its ``auth.hint`` string. Injecting it here, from the
-    single source of truth (``MCP_OAUTH_REDIRECT_URI``), lets the setup UI
-    render it as a first-class copyable field instead -- and keeps every
-    integration in sync if the callback port ever changes.
+
+def _annotate_oauth_setup(
+    setup: dict[str, Any] | None, servers: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Tell the setup UI whether an oauth2 integration is ready to connect.
+
+    Client IDs/secrets are never sent to the frontend -- only whether the
+    backend has them (``provider_configured``). An integration with no
+    ``provider`` needs no pre-registered app at all (dynamic client
+    registration, e.g. Linear/Jira) and is always considered ready.
     """
     if not isinstance(setup, dict):
         return setup
     auth = setup.get("auth")
     if not isinstance(auth, dict) or auth.get("method") != "oauth2":
         return setup
-    return {**setup, "auth": {**auth, "redirect_uri": MCP_OAUTH_REDIRECT_URI}}
+    provider = _oauth_provider_of(servers)
+    if provider is None:
+        return setup
+    configured = provider in configured_oauth_providers()
+    return {**setup, "auth": {**auth, "provider": provider, "provider_configured": configured}}
 
 
 def _bundled_integration_entries(
@@ -472,7 +493,7 @@ def _bundled_integration_entries(
             )
             continue
         setup, servers = marketplace.load_integration_contents(entry)
-        setup = _with_oauth_redirect_uri(setup)
+        setup = _annotate_oauth_setup(setup, servers)
         entries.append(
             MarketplacePluginInfo(
                 name=entry.name,

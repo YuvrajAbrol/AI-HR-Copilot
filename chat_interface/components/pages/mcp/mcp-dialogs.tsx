@@ -314,9 +314,23 @@ export function McpConnectionDialog({
     if (oauthBusy || oauthConnected) return
     const spec = buildSpec()
     if (!spec) return
+    // Custom servers have no marketplace catalog entry (and so no backend
+    // provider config to resolve against) -- this manual client id/secret
+    // is the one place the app still accepts OAuth app credentials directly,
+    // since there's no other way to authorize an arbitrary unlisted server.
+    if (clientId.trim()) {
+      spec.auth = {
+        strategy: "oauth2",
+        authentication: {
+          type: "oauth",
+          client_id: clientId.trim(),
+          client_secret: clientSecret.trim() || undefined,
+        },
+      } as NonNullable<mcpApi.McpServerConfig["auth"]>
+    }
     setOauthBusy(true)
     try {
-      const jobId = await startOAuth(spec, { clientId: clientId.trim() || undefined, clientSecret: clientSecret.trim() || undefined })
+      const jobId = await startOAuth(spec)
       if (!jobId) return
       await completeOAuth(jobId, (state) => setOauthState(state))
     } finally {

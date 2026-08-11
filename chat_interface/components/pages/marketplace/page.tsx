@@ -22,6 +22,7 @@ import {
   SearchBar,
   SegmentedTabs,
   Tag,
+  type McpCardStatus,
 } from "@/components/management/shared"
 import { McpConnectionDialog } from "@/components/pages/mcp/mcp-dialogs"
 import { SkillActivateDialog } from "./skill-activate-dialog"
@@ -313,8 +314,9 @@ function McpSection({
   onQueryChange,
   category,
   onCategoryChange,
-  installedNames,
+  statusByName,
   onInstall,
+  onManage,
   onAddCustom,
   loading,
   error,
@@ -325,8 +327,11 @@ function McpSection({
   onQueryChange: (v: string) => void
   category: string
   onCategoryChange: (v: string) => void
-  installedNames: Set<string>
+  /** Real state from the backend/plugin config for every installed
+   *  integration — never a frontend guess. See McpCardStatus. */
+  statusByName: Map<string, McpCardStatus>
   onInstall: (id: string) => void
+  onManage: (id: string) => void
   onAddCustom: () => void
   loading: boolean
   /** True when the last catalog refetch failed — `catalog` still holds
@@ -334,6 +339,10 @@ function McpSection({
   error?: boolean
   onRetry?: () => void
 }) {
+  const installedNames = useMemo(
+    () => new Set(Array.from(statusByName.entries()).filter(([, s]) => s !== "not-installed").map(([n]) => n)),
+    [statusByName],
+  )
   const categories = useMemo(
     () => ["All", ...Array.from(new Set(catalog.map((l) => l.category))), "Registry"],
     [catalog],
@@ -455,7 +464,7 @@ function McpSection({
                   description={item.server.description || "No description provided."}
                   category="Registry"
                   serverType="stdio"
-                  installed={installedNames.has(item.server.name.toLowerCase())}
+                  status={statusByName.get(item.server.name.toLowerCase()) ?? "not-installed"}
                   onInstall={() => onAddCustom()}
                   onConfigure={() => onAddCustom()}
                 />
@@ -475,9 +484,10 @@ function McpSection({
                 description={lib.description}
                 category={lib.category}
                 serverType={lib.serverType}
-                installed={installedNames.has(lib.name.toLowerCase())}
+                status={statusByName.get(lib.name.toLowerCase()) ?? "not-installed"}
                 onInstall={() => onInstall(lib.id)}
                 onConfigure={() => onInstall(lib.id)}
+                onManage={() => onManage(lib.id)}
               />
             </div>
           ))}
@@ -510,17 +520,41 @@ export function MarketplaceDashboard() {
   const [activateTarget, setActivateTarget] = useState<SkillTemplate | null>(null)
 
   const installedSkillNames = useMemo(() => new Set(skills.map((s) => s.name.toLowerCase())), [skills])
-  // Installed-state truth comes from the backend catalog's `installed` flag
-  // (plugin install dir) unioned with servers present in settings.mcp_config —
-  // an installed plugin never shows a spurious "Install" button again.
-  const installedServerNames = useMemo(
-    () =>
-      new Set([
-        ...catalog.filter((l) => l.installed).map((l) => l.name.toLowerCase()),
-        ...connections.map((c) => c.name.toLowerCase()),
-      ]),
-    [catalog, connections],
-  )
+  // Real state from the backend/plugin config for every MCP integration —
+  // never a frontend guess, and never stuck showing "Configure" (or worse,
+  // "Install") for something that's actually already connected:
+  //   not-installed  -- absent from both the plugin-installed catalog flag
+  //                      and settings.mcp_config
+  //   needs-setup    -- installed, but at least one of its provisioned
+  //                      servers still needs credentials/OAuth
+  //                      (McpConnection.setupNeeded)
+  //   connected      -- installed and every provisioned server is
+  //                      authenticated
+  const mcpStatusByName = useMemo(() => {
+    const map = new Map<string, McpCardStatus>()
+    for (const lib of catalog) {
+      const name = lib.name.toLowerCase()
+      const serverNames = lib.servers ? Object.keys(lib.servers) : [lib.name]
+      const provisioned = connections.filter((c) => serverNames.includes(c.id))
+      if (provisioned.length > 0) {
+        map.set(name, provisioned.some((c) => c.setupNeeded) ? "needs-setup" : "connected")
+      } else if (lib.installed) {
+        // Plugin installed but no servers provisioned yet (e.g. a
+        // plugin-only install with nothing in settings.mcp_config yet).
+        map.set(name, "needs-setup")
+      } else {
+        map.set(name, "not-installed")
+      }
+    }
+    // A server can exist in settings.mcp_config without (or ahead of) its
+    // catalog entry loading -- still needs a real status, not the implicit
+    // "not-installed" a missing map entry would fall back to.
+    for (const conn of connections) {
+      const name = conn.name.toLowerCase()
+      if (!map.has(name)) map.set(name, conn.setupNeeded ? "needs-setup" : "connected")
+    }
+    return map
+  }, [catalog, connections])
 
   const installSkill = (id: string) => {
     const tpl = SKILL_TEMPLATES.find((t) => t.id === id)
@@ -541,6 +575,8 @@ export function MarketplaceDashboard() {
     await installAndProvision(lib, { values: {} })
     setView("mcp")
   }
+  // Already connected -- just go manage it, no need to touch settings.
+  const manageMcp = () => setView("mcp")
 
   return (
     <div className="dream-in flex h-screen w-full overflow-hidden bg-background">
@@ -646,8 +682,9 @@ export function MarketplaceDashboard() {
                   onQueryChange={setMcpQuery}
                   category={mcpCategory}
                   onCategoryChange={setMcpCategory}
-                  installedNames={installedServerNames}
+                  statusByName={mcpStatusByName}
                   onInstall={installMcp}
+                  onManage={manageMcp}
                   onAddCustom={() => setCustomOpen(true)}
                   loading={catalogLoading}
                   error={catalogError}
