@@ -184,6 +184,12 @@ export function McpDetailPanel({
                   Set up credentials
                 </DropdownMenuItem>
               )}
+              {!connection.setupNeeded && connection.auth === "OAuth 2.0" && (
+                <DropdownMenuItem onClick={() => onSetup(connection)} className="gap-2 text-[13px]">
+                  <KeyRound />
+                  Re-authenticate
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={() => onDuplicate(connection)} className="gap-2 text-[13px]">
                 <Copy />
                 Duplicate

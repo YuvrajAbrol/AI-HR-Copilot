@@ -50,6 +50,7 @@ export function McpConnectionsPage() {
     testingId,
     reconnectingId,
     rotatingId,
+    load,
     toggleConnection,
     testConnection,
     reconnectConnection,
@@ -176,13 +177,26 @@ export function McpConnectionsPage() {
         </div>
       </div>
 
+      {dataSource === "error" && (
+        <div className="dream-in mb-4 flex items-center justify-between gap-3 rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3">
+          <div className="flex items-center gap-2 text-[13px] text-red-300">
+            <WifiOff className="h-4 w-4 shrink-0" />
+            Couldn&apos;t reach the backend to load your MCP servers. This isn&apos;t the same as having none configured.
+          </div>
+          <Button variant="secondary" size="sm" onClick={() => void load()} className="shrink-0 gap-2">
+            <RefreshCw className="h-3.5 w-3.5" />
+            Retry
+          </Button>
+        </div>
+      )}
+
       {loading ? (
         <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-[96px] animate-pulse rounded-xl border border-border/60 bg-card/30" />
           ))}
         </div>
-      ) : filtered.length === 0 ? (
+      ) : filtered.length === 0 && dataSource === "error" ? null : filtered.length === 0 ? (
         <div className="dream-in flex flex-col items-center justify-center rounded-xl border border-dashed border-border/60 bg-card/30 px-6 py-16 text-center">
           <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-border/60 bg-secondary/60">
             {connections.length === 0 ? (
@@ -259,6 +273,12 @@ export function McpConnectionsPage() {
                       <DropdownMenuItem onClick={() => openSetup(c)}>
                         <KeyRound />
                         Set up credentials
+                      </DropdownMenuItem>
+                    )}
+                    {!c.setupNeeded && c.auth === "OAuth 2.0" && (
+                      <DropdownMenuItem onClick={() => openSetup(c)}>
+                        <KeyRound />
+                        Re-authenticate
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuItem onClick={() => duplicateConnection(c)}>

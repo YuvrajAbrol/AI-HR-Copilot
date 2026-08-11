@@ -8,9 +8,11 @@ import {
   Home,
   Plug,
   Plus,
+  RefreshCw,
   SearchX,
   Sparkles,
   Store,
+  WifiOff,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -315,6 +317,8 @@ function McpSection({
   onInstall,
   onAddCustom,
   loading,
+  error,
+  onRetry,
 }: {
   catalog: LibraryServer[]
   query: string
@@ -325,6 +329,10 @@ function McpSection({
   onInstall: (id: string) => void
   onAddCustom: () => void
   loading: boolean
+  /** True when the last catalog refetch failed — `catalog` still holds
+   *  whatever was last loaded successfully, never wiped to empty. */
+  error?: boolean
+  onRetry?: () => void
 }) {
   const categories = useMemo(
     () => ["All", ...Array.from(new Set(catalog.map((l) => l.category))), "Registry"],
@@ -386,6 +394,21 @@ function McpSection({
           </Button>
         }
       />
+
+      {error && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3">
+          <div className="flex items-center gap-2 text-[13px] text-red-300">
+            <WifiOff className="h-4 w-4 shrink-0" />
+            Couldn&apos;t refresh the marketplace catalog — showing the last loaded list.
+          </div>
+          {onRetry && (
+            <Button variant="secondary" size="sm" onClick={onRetry} className="shrink-0 gap-2">
+              <RefreshCw className="h-3.5 w-3.5" />
+              Retry
+            </Button>
+          )}
+        </div>
+      )}
 
       <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="w-full max-w-sm">
@@ -477,7 +500,7 @@ const SIDEBAR_NAV = [
 export function MarketplaceDashboard() {
   const { marketplaceSection, setMarketplaceSection, marketplaceOrigin, setView } = useNavigation()
   const { skills, installTemplate } = useSkills()
-  const { connections, catalog, catalogLoading, upsertConnection, installAndProvision } = useMcp()
+  const { connections, catalog, catalogLoading, catalogError, loadCatalog, upsertConnection, installAndProvision } = useMcp()
 
   const [skillQuery, setSkillQuery] = useState("")
   const [skillCategory, setSkillCategory] = useState("All")
@@ -627,6 +650,8 @@ export function MarketplaceDashboard() {
                   onInstall={installMcp}
                   onAddCustom={() => setCustomOpen(true)}
                   loading={catalogLoading}
+                  error={catalogError}
+                  onRetry={() => void loadCatalog()}
                 />
               )}
             </div>

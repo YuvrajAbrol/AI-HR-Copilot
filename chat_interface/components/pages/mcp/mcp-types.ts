@@ -110,6 +110,11 @@ export interface SetupAuthConfig {
   client_id?: string
   client_secret?: string
   hint?: string
+  /** For method="oauth2": the fixed local callback URL the provider's app
+   *  registration must allow, e.g. "http://localhost:8765/callback".
+   *  Backend-injected from a single source of truth — always present when
+   *  client_id/client_secret request a pre-registered app. */
+  redirect_uri?: string
   /** For method="oauth2": a safe read-only tool to invoke once tools are
    *  listed, so servers that only gate individual tool calls (not
    *  tools/list) still trigger a real auth challenge during setup instead

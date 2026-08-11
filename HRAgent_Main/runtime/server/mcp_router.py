@@ -37,6 +37,7 @@ from starlette import status
 from mcp_integration import create_mcp_tools
 from mcp_integration.client import MCPClient
 from mcp_integration.config import (
+    MCP_OAUTH_CALLBACK_PORT,
     MCPAuthCredential,
     MCPOAuthState,
     MCPOAuthStateResponse,
@@ -459,14 +460,9 @@ async def test_mcp_server(
 
 _OAUTH_JOB_TTL_SECONDS = 15 * 60
 _OAUTH_START_WAIT_SECONDS = 3.0
-# Fixed local callback port for every OAuth job. Providers that validate
-# redirect_uri by exact match (Slack) rather than allowing any localhost
-# loopback port (Google Desktop-app clients, Linear's DCR) require the
-# integration's registered app to use this exact
-# http://localhost:{port}/callback value. 8765 is arbitrary but fixed so it
-# can be documented once per integration setup guide. One OAuth job runs at a
-# time in practice (single local user), so a shared port is fine.
-_OAUTH_CALLBACK_PORT = 8765
+# See mcp_integration.config.MCP_OAUTH_CALLBACK_PORT for why this is fixed
+# rather than per-job.
+_OAUTH_CALLBACK_PORT = MCP_OAUTH_CALLBACK_PORT
 
 OAuthJobStatus = Literal["pending", "authorizing", "succeeded", "failed"]
 

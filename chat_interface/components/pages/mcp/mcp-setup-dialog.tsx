@@ -15,7 +15,7 @@ import {
 import { Tag } from "@/components/management/shared"
 import * as mcpApi from "@/lib/mcp-api"
 import { substitutePlaceholders, useMcp, type McpSetupValues } from "@/lib/mcp-store"
-import { McpSetupForm } from "./mcp-setup-form"
+import { McpSetupForm, setupComplete } from "./mcp-setup-form"
 import type { LibraryServer, McpConnection } from "./mcp-types"
 
 /** Convert an integration's .mcp.json server template (after ${VAR}
@@ -98,6 +98,10 @@ export function McpSetupDialog({
   const savedAuth = connection.config?.auth as Record<string, unknown> | undefined
   const oauthAlready = savedAuth?.strategy === "oauth2" && Boolean(savedAuth.state)
   const isOAuth = schema?.auth?.method === "oauth2"
+  // Drives the Save button's disabled state — the same check handleSave
+  // re-verifies before submitting, so the button reflects reality instead
+  // of only failing after a click.
+  const canSave = schema ? setupComplete(schema, setup.values, setup.oauthState, oauthAlready) : false
 
   const handleConnectOAuth = async (clientId?: string, clientSecret?: string) => {
     if (!firstTemplate) return null
@@ -137,7 +141,10 @@ export function McpSetupDialog({
 
   const handleSave = async () => {
     if (!schema) return
-    // Validate required fields from the schema.
+    // Same check the Save button's `disabled` state uses (see `canSave`
+    // below) — re-run here so a stale click (e.g. a field cleared right
+    // before submit) still gets a precise, field-specific message instead
+    // of silently doing nothing.
     for (const field of schema.fields ?? []) {
       if (field.required && !String(setup.values[field.name] ?? "").trim()) {
         toast.error(`${field.label} is required`)
@@ -150,7 +157,7 @@ export function McpSetupDialog({
         return
       }
     }
-    if (schema.auth?.method === "oauth2" && !setup.oauthState && !oauthAlready && !savedAuth) {
+    if (schema.auth?.method === "oauth2" && !setup.oauthState && !oauthAlready) {
       toast.error("Complete the OAuth flow first")
       return
     }
@@ -177,7 +184,7 @@ export function McpSetupDialog({
       //    reuse them.
       if (isOAuth && schema?.auth) {
         const envPatch: Record<string, string | null> = {}
-        const { client_id, client_secret } = schema.auth as Record<string, string>
+        const { client_id, client_secret } = schema.auth
         for (const clientField of [client_id, client_secret]) {
           if (clientField && typeof setup.values[clientField] === "string") {
             envPatch[clientField] = setup.values[clientField] as string
@@ -329,7 +336,8 @@ export function McpSetupDialog({
               </Button>
               <Button
                 onClick={handleSave}
-                disabled={saving}
+                disabled={saving || !canSave}
+                title={!canSave ? "Complete the required fields above first" : undefined}
                 className="gap-2 bg-primary text-primary-foreground hover:opacity-90"
               >
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}

@@ -22,6 +22,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError
 
 from runtime.telemetry.logger import get_logger
+from mcp_integration.config import MCP_OAUTH_REDIRECT_URI
 from plugins.marketplace import Marketplace
 from plugins import (
     InstalledPluginInfo,
@@ -437,6 +438,23 @@ def _load_bundled_marketplace() -> Marketplace | None:
         return None
 
 
+def _with_oauth_redirect_uri(setup: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Stamp the fixed OAuth callback redirect URI onto an oauth2 setup schema.
+
+    Every integration's ``plugin.json`` used to duplicate this value as
+    static prose in its ``auth.hint`` string. Injecting it here, from the
+    single source of truth (``MCP_OAUTH_REDIRECT_URI``), lets the setup UI
+    render it as a first-class copyable field instead -- and keeps every
+    integration in sync if the callback port ever changes.
+    """
+    if not isinstance(setup, dict):
+        return setup
+    auth = setup.get("auth")
+    if not isinstance(auth, dict) or auth.get("method") != "oauth2":
+        return setup
+    return {**setup, "auth": {**auth, "redirect_uri": MCP_OAUTH_REDIRECT_URI}}
+
+
 def _bundled_integration_entries(
     installed_names: set[str],
 ) -> list[MarketplacePluginInfo]:
@@ -454,6 +472,7 @@ def _bundled_integration_entries(
             )
             continue
         setup, servers = marketplace.load_integration_contents(entry)
+        setup = _with_oauth_redirect_uri(setup)
         entries.append(
             MarketplacePluginInfo(
                 name=entry.name,

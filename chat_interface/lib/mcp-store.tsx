@@ -332,13 +332,20 @@ function addEvent(
 /*  Context                                                            */
 /* ------------------------------------------------------------------ */
 
-export type DataSource = "loading" | "empty" | "backend"
+/** "error" is distinct from "empty": a failed fetch must never be presented
+ *  as "you have zero MCP servers" — that's how installed servers appear to
+ *  "disappear" on a flaky cold load. Only a genuinely successful fetch that
+ *  returned zero configured servers reaches "empty". */
+export type DataSource = "loading" | "empty" | "backend" | "error"
 
 interface McpContextValue {
   connections: McpConnection[]
   dataSource: DataSource
   catalog: LibraryServer[]
   catalogLoading: boolean
+  /** True when the last catalog refetch failed. `catalog` still holds the
+   *  last successfully-loaded entries — never wiped to an empty array. */
+  catalogError: boolean
   testingId: string | null
   reconnectingId: string | null
   rotatingId: string | null
@@ -391,6 +398,7 @@ export function McpProvider({ children }: { children: ReactNode }) {
   const [dataSource, setDataSource] = useState<DataSource>("loading")
   const [catalog, setCatalog] = useState<LibraryServer[]>([])
   const [catalogLoading, setCatalogLoading] = useState(true)
+  const [catalogError, setCatalogError] = useState(false)
   const [testingId, setTestingId] = useState<string | null>(null)
   const [reconnectingId, setReconnectingId] = useState<string | null>(null)
   const [rotatingId, setRotatingId] = useState<string | null>(null)
@@ -417,7 +425,12 @@ export function McpProvider({ children }: { children: ReactNode }) {
       setDataSource(Object.keys(config).length > 0 ? "backend" : "empty")
     } catch (error) {
       console.error("Failed to load MCP connections:", error)
-      setDataSource("empty")
+      // A fetch failure must never masquerade as "zero servers configured":
+      // if a prior load already populated `connections`, keep showing them
+      // (this call's catch never touched `connections`) and just surface the
+      // failure. Only a cold-start failure — nothing successfully loaded yet
+      // — moves to the distinct "error" state instead of "empty".
+      setDataSource((prev) => (prev === "backend" ? prev : "error"))
       toast.error(error instanceof Error ? error.message : "Failed to load MCP servers")
     }
   }, [catalog])
@@ -457,9 +470,15 @@ export function McpProvider({ children }: { children: ReactNode }) {
           servers: (p.servers as LibraryServer["servers"]) ?? undefined,
         })),
       )
+      setCatalogError(false)
     } catch (error) {
       console.error("Failed to load marketplace catalog:", error)
-      setCatalog([])
+      // Never wipe a previously-good catalog on a transient refetch failure
+      // (e.g. right after install, while the backend is still busy) — that's
+      // how the marketplace appears to drop to "0 servers". Keep whatever
+      // was last successfully loaded and surface the failure instead.
+      setCatalogError(true)
+      toast.error(error instanceof Error ? error.message : "Failed to load MCP marketplace")
     } finally {
       setCatalogLoading(false)
     }
@@ -1071,6 +1090,7 @@ export function McpProvider({ children }: { children: ReactNode }) {
       dataSource,
       catalog,
       catalogLoading,
+      catalogError,
       testingId,
       reconnectingId,
       rotatingId,
@@ -1102,6 +1122,7 @@ export function McpProvider({ children }: { children: ReactNode }) {
       dataSource,
       catalog,
       catalogLoading,
+      catalogError,
       testingId,
       reconnectingId,
       rotatingId,

@@ -1,7 +1,7 @@
 {
   "name": "google-drive",
   "version": "1.0.0",
-  "description": "Google Drive integration — list, read, search and upload files via official Google MCP server (https://drivemcp.googleapis.com/mcp/v1, OAuth2).",
+  "description": "Google Drive integration \u2014 list, read, search and upload files via official Google MCP server (https://drivemcp.googleapis.com/mcp/v1, OAuth2).",
   "category": "Storage",
   "authentication": "Google OAuth 2.0",
   "tools": [
@@ -21,8 +21,11 @@
       "label": "Connect with Google",
       "client_id": "GOOGLE_CLIENT_ID",
       "client_secret": "GOOGLE_CLIENT_SECRET",
-      "hint": "Authorizes via Google's OAuth 2.0 flow. Optionally supply your own GCP OAuth client ID/secret.",
-      "verify_tool_call": { "name": "list_recent_files", "arguments": {} }
+      "hint": "Authorizes via Google's OAuth 2.0 flow. Google does not support dynamic client registration for this scope -- create an OAuth client (type \"Desktop app\") in Google Cloud Console and paste its ID/secret below.",
+      "verify_tool_call": {
+        "name": "list_recent_files",
+        "arguments": {}
+      }
     },
     "fields": [
       {
@@ -30,16 +33,16 @@
         "label": "Google OAuth Client ID",
         "type": "text",
         "secret": true,
-        "required": false,
-        "placeholder": "…apps.googleusercontent.com",
-        "hint": "Optional — leave blank to use Google's built-in OAuth client."
+        "required": true,
+        "placeholder": "\u2026apps.googleusercontent.com",
+        "hint": "Google Cloud Console -> APIs & Services -> Credentials. Use an OAuth client of type \"Desktop app\"."
       },
       {
         "name": "GOOGLE_CLIENT_SECRET",
         "label": "Google OAuth Client Secret",
         "type": "password",
         "secret": true,
-        "required": false
+        "required": true
       }
     ]
   }
