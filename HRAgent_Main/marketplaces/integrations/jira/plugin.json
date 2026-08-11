@@ -14,7 +14,8 @@
     "auth": {
       "method": "oauth2",
       "label": "Connect with Atlassian",
-      "hint": "Authorizes via the Atlassian-hosted OAuth endpoint (mcp.atlassian.com)."
+      "hint": "Authorizes via the Atlassian-hosted OAuth endpoint (mcp.atlassian.com).",
+      "verify_tool_call": { "name": "getTeamworkGraphContext", "arguments": {} }
     }
   }
 }

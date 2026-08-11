@@ -103,7 +103,7 @@ export function McpSetupDialog({
     if (!firstTemplate) return null
     const spec = templateToProbeSpec(firstTemplate, setup.values)
     if (!spec) return null
-    return startOAuth(spec, { clientId, clientSecret })
+    return startOAuth(spec, { clientId, clientSecret, verifyToolCall: schema?.auth?.verify_tool_call })
   }
 
   /* Persist the completed session into this server's config the moment the

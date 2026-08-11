@@ -282,8 +282,19 @@ function applySetupContext(
     for (const serverName of Object.keys(lib.servers ?? {})) libByServer.set(serverName, lib)
   }
   return conns.map((c) => {
-    const template = libByServer.get(c.id)?.servers?.[c.id] as Record<string, unknown> | undefined
-    const missing = template ? refsFromTemplate(template).filter((n) => !secrets.has(n)) : []
+    const lib = libByServer.get(c.id)
+    const template = lib?.servers?.[c.id] as Record<string, unknown> | undefined
+    // A ${VAR} ref only blocks setup if its schema field doesn't explicitly
+    // mark itself optional (required: false) -- e.g. microsoft-365's fields
+    // all fall back to server-side defaults when left blank, so referencing
+    // them in the .mcp.json template alone shouldn't force the user to fill
+    // them in before Save & configure will do anything.
+    const optionalVars = new Set(
+      (lib?.setup?.fields ?? []).filter((f) => f.required === false).map((f) => f.name),
+    )
+    const missing = template
+      ? refsFromTemplate(template).filter((n) => !secrets.has(n) && !optionalVars.has(n))
+      : []
     const setupNeeded = missing.length > 0 || c.setupNeeded
     return { ...c, setupNeeded, missingSecrets: missing, connected: !setupNeeded && c.connected }
   })
@@ -347,7 +358,11 @@ interface McpContextValue {
   /** Start a browser-coordinated OAuth flow against a probe spec; returns job_id. */
   startOAuth: (
     spec: mcpApi.McpTestServerSpec,
-    opts?: { clientId?: string; clientSecret?: string },
+    opts?: {
+      clientId?: string
+      clientSecret?: string
+      verifyToolCall?: { name: string; arguments?: Record<string, unknown> }
+    },
   ) => Promise<string | null>
   /** Poll an OAuth job until it completes, invoking onSuccess with the session state. */
   completeOAuth: (
@@ -646,7 +661,14 @@ export function McpProvider({ children }: { children: ReactNode }) {
   /* ---------------- OAuth ---------------- */
 
   const startOAuth = useCallback(
-    async (spec: mcpApi.McpTestServerSpec, opts?: { clientId?: string; clientSecret?: string }) => {
+    async (
+      spec: mcpApi.McpTestServerSpec,
+      opts?: {
+        clientId?: string
+        clientSecret?: string
+        verifyToolCall?: { name: string; arguments?: Record<string, unknown> }
+      },
+    ) => {
       const auth: Record<string, unknown> = { strategy: "oauth2" }
       if (opts?.clientId) {
         auth.authentication = { type: "oauth", client_id: opts.clientId, client_secret: opts.clientSecret ?? "" }
@@ -655,7 +677,14 @@ export function McpProvider({ children }: { children: ReactNode }) {
       }
       spec.auth = auth as NonNullable<mcpApi.McpServerConfig["auth"]>
       try {
-        const res = await mcpApi.oauthStart({ server: spec })
+        const res = await mcpApi.oauthStart({
+          server: spec,
+          // Some MCP servers only gate individual tool calls, not
+          // tools/list -- without forcing a real call, the job can report
+          // "succeeded" without ever obtaining a token. See mcp_router.py's
+          // _run_oauth_job for the backend half of this.
+          ...(opts?.verifyToolCall ? { tool_call: opts.verifyToolCall } : {}),
+        })
         if (res.ok && res.job_id) {
           if (res.authorization_url) window.open(res.authorization_url, "_blank", "noopener,noreferrer")
           return res.job_id

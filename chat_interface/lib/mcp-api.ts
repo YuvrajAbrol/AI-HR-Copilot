@@ -206,13 +206,6 @@ export async function oauthStatus(jobId: string): Promise<OAuthStatusResponse> {
   return request<OAuthStatusResponse>(`/api/mcp/oauth/status/${encodeURIComponent(jobId)}`)
 }
 
-export async function oauthCallback(jobId: string, callbackUrl: string): Promise<OAuthStatusResponse> {
-  return request<OAuthStatusResponse>(
-    `/api/mcp/oauth/callback/${encodeURIComponent(jobId)}`,
-    jsonInit("POST", { callback_url: callbackUrl }),
-  )
-}
-
 /* ------------------------------------------------------------------ */
 /*  Plugins                                                            */
 /* ------------------------------------------------------------------ */

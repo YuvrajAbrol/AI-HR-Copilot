@@ -18,27 +18,30 @@
     "auth": {
       "method": "env",
       "label": "Microsoft Entra ID (OAuth)",
-      "hint": "The M365 server performs its own MSAL OAuth using these Azure app credentials."
+      "hint": "The M365 server performs its own interactive MSAL login (a browser window it opens itself). All fields are optional: it falls back to a built-in Microsoft public client and the 'common' (any Microsoft account) tenant when left blank -- only set these if you need your own Azure app registration."
     },
     "fields": [
       {
         "name": "MS365_MCP_CLIENT_ID",
         "label": "Azure App Client ID",
         "type": "text",
-        "required": true
+        "required": false,
+        "hint": "Optional — leave blank to use the server's built-in Microsoft public client."
       },
       {
         "name": "MS365_MCP_CLIENT_SECRET",
         "label": "Azure App Client Secret",
         "type": "password",
         "secret": true,
-        "required": true
+        "required": false,
+        "hint": "Only needed for a confidential (secret-bearing) Azure app; the default public client needs none."
       },
       {
         "name": "MS365_MCP_TENANT_ID",
         "label": "Azure Tenant ID",
         "type": "text",
-        "required": true
+        "required": false,
+        "hint": "Optional — leave blank to use 'common' (works with any Microsoft personal or work account)."
       }
     ]
   }

@@ -20,11 +20,17 @@ persist it through the settings API under the tested server's ``auth.state``.
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
+from dataclasses import dataclass, field as dataclass_field
 from typing import Annotated, Any, Literal
 
 import httpx
 import mcp.types
 from fastapi import APIRouter, HTTPException, Request
+from fastmcp import Client as AsyncMCPClient
+from fastmcp.client.auth.oauth import OAuth as FastMCPOAuth
+from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import BaseModel, Field, model_validator
 from starlette import status
 
@@ -32,11 +38,13 @@ from mcp_integration import create_mcp_tools
 from mcp_integration.client import MCPClient
 from mcp_integration.config import (
     MCPAuthCredential,
+    MCPOAuthState,
     MCPOAuthStateResponse,
     MCPServer,
 )
 from mcp_integration.exceptions import MCPError, MCPTimeoutError
 from runtime.server._secrets_exposure import get_cipher
+from runtime.server.mcp_oauth_store import InMemoryMCPOAuthTokenStore
 from runtime.telemetry.logger import get_logger
 from utilities.cipher import Cipher
 
@@ -424,6 +432,370 @@ async def test_mcp_server(
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# OAuth authorization jobs
+# ---------------------------------------------------------------------------
+#
+# The marketplace/settings UI drives OAuth servers through a poll-based job:
+# POST /oauth/start kicks the flow off and (usually) returns the provider's
+# authorization URL for the UI to open in a new tab; GET /oauth/status/{id}
+# is polled until the job succeeds or fails. This intentionally reuses
+# FastMCP's own OAuthClientProvider (dynamic client registration, PKCE, token
+# exchange, and its own localhost callback HTTP server) rather than
+# reimplementing any of that -- the only thing overridden is
+# ``redirect_handler``, which normally opens a browser on the *server*
+# process; here it just hands the URL to the job instead.
+#
+# Jobs run against an in-memory token store scoped to the job, not the
+# settings-backed one: the server being authorized may not be saved yet (the
+# user could still be filling out the "Add server" dialog). On success the
+# resulting ``oauth_state`` is returned to the caller, which is responsible
+# for persisting it via PATCH /settings under the server's ``auth.state`` --
+# mirroring how POST /mcp/test already reports (but never persists)
+# ``oauth_state``.
+
+_OAUTH_JOB_TTL_SECONDS = 15 * 60
+_OAUTH_START_WAIT_SECONDS = 3.0
+# Fixed local callback port for every OAuth job. Providers that validate
+# redirect_uri by exact match (Slack) rather than allowing any localhost
+# loopback port (Google Desktop-app clients, Linear's DCR) require the
+# integration's registered app to use this exact
+# http://localhost:{port}/callback value. 8765 is arbitrary but fixed so it
+# can be documented once per integration setup guide. One OAuth job runs at a
+# time in practice (single local user), so a shared port is fine.
+_OAUTH_CALLBACK_PORT = 8765
+
+OAuthJobStatus = Literal["pending", "authorizing", "succeeded", "failed"]
+
+
+@dataclass
+class _OAuthJob:
+    status: OAuthJobStatus = "pending"
+    authorization_url: str | None = None
+    callback_ready: bool = False
+    tools: list[MCPTestToolInfo] | None = None
+    oauth_state: MCPOAuthState | None = None
+    error: str | None = None
+    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+    created_at: float = dataclass_field(default_factory=time.time)
+    updated: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+
+
+_OAUTH_JOBS: dict[str, _OAuthJob] = {}
+_OAUTH_TASKS: dict[str, asyncio.Task[None]] = {}
+
+
+def _prune_oauth_jobs() -> None:
+    cutoff = time.time() - _OAUTH_JOB_TTL_SECONDS
+    for job_id in [jid for jid, job in _OAUTH_JOBS.items() if job.created_at < cutoff]:
+        _OAUTH_JOBS.pop(job_id, None)
+        task = _OAUTH_TASKS.pop(job_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+
+class _JobOAuth(FastMCPOAuth):
+    """FastMCP's ``OAuth`` provider, adapted to a poll-based web job.
+
+    Everything (DCR, PKCE, token exchange, the local callback HTTP server
+    that receives the provider's redirect) is inherited unchanged. Only
+    ``redirect_handler`` is overridden: instead of calling
+    ``webbrowser.open()`` on the backend process, it publishes the
+    authorization URL onto the job so ``/oauth/status`` can hand it to the
+    caller, who opens it in the *user's* browser.
+    """
+
+    def __init__(self, job: _OAuthJob, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._job = job
+
+    async def redirect_handler(self, authorization_url: str) -> None:
+        self._job.authorization_url = authorization_url
+        self._job.status = "authorizing"
+        self._job.callback_ready = True
+        self._job.updated.set()
+        self._job.updated = asyncio.Event()
+
+
+def _classify_oauth_error(exc: Exception) -> Literal["timeout", "connection", "unknown"]:
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, (MCPError, httpx.HTTPError, OSError, ConnectionError)):
+        return "connection"
+    return "unknown"
+
+
+async def _run_oauth_job(
+    job_id: str,
+    server: MCPServer,
+    cipher: Cipher | None,
+    tool_call: MCPToolCallSpec | None,
+) -> None:
+    job = _OAUTH_JOBS[job_id]
+    try:
+        decrypted = server.with_decrypted_secrets(cipher=cipher)
+        oauth_cred = decrypted.oauth_auth
+        if oauth_cred is None or decrypted.url is None:
+            raise ValueError(
+                "server.auth.strategy must be 'oauth2' with a remote 'url' to "
+                "start an OAuth job"
+            )
+
+        auth_meta = oauth_cred.authentication
+        scopes = auth_meta.scopes if auth_meta else None
+        client_name = (auth_meta.client_name if auth_meta else None) or "HRAgent"
+        additional_metadata = dict(auth_meta.additional_client_metadata or {}) if auth_meta else {}
+        # Dynamically-registered MCP clients are public (PKCE-only, no
+        # client_secret) unless a pre-registered confidential client_id was
+        # supplied below. Without this, some authorization servers (e.g.
+        # Linear) register a confidential client by default, and the later
+        # token exchange -- which always sends the PKCE code_verifier --
+        # gets rejected with "must not use multiple authentication methods"
+        # because it also carries client credentials.
+        if not (auth_meta is not None and auth_meta.client_id):
+            additional_metadata.setdefault("token_endpoint_auth_method", "none")
+
+        token_store = InMemoryMCPOAuthTokenStore()
+        job_oauth = _JobOAuth(
+            job,
+            mcp_url=decrypted.url,
+            scopes=scopes,
+            client_name=client_name,
+            token_storage=token_store,
+            additional_client_metadata=additional_metadata or None,
+            # A fixed port (not FastMCP's default random one) is required for
+            # any provider that validates redirect_uri by exact match against
+            # a pre-registered value (e.g. Slack) rather than allowing any
+            # localhost loopback port (Google Desktop-app clients, Linear's
+            # DCR). Provider apps must register
+            # http://localhost:{_OAUTH_CALLBACK_PORT}/callback exactly.
+            callback_port=_OAUTH_CALLBACK_PORT,
+        )
+
+        # Providers that don't support dynamic client registration (e.g.
+        # Google) require a pre-registered client id/secret; when supplied,
+        # seed it directly so OAuthClientProvider skips DCR.
+        if auth_meta is not None and auth_meta.client_id:
+            client_secret_value = (
+                auth_meta.client_secret.get_secret_value()
+                if auth_meta.client_secret is not None
+                else None
+            )
+            await job_oauth.token_storage_adapter.set_client_info(
+                OAuthClientInformationFull(
+                    client_id=auth_meta.client_id,
+                    client_secret=client_secret_value,
+                    redirect_uris=[f"http://localhost:{job_oauth.redirect_port}/callback"],
+                    grant_types=["authorization_code", "refresh_token"],
+                    response_types=["code"],
+                    # Without this, mcp.client.auth.oauth2's prepare_token_auth
+                    # only attaches client_secret when token_endpoint_auth_method
+                    # is explicitly "client_secret_basic" or "client_secret_post"
+                    # -- leaving it unset drops the secret from the token
+                    # exchange entirely ("client_secret is missing", even
+                    # though we have one).
+                    token_endpoint_auth_method=(
+                        "client_secret_post" if client_secret_value else "none"
+                    ),
+                )
+            )
+
+        # FastMCP's own OAuth callback wait allows up to 5 minutes for the
+        # user to complete the provider's login/consent screens; give the
+        # overall connection at least that long instead of timing out under
+        # a real human.
+        async with AsyncMCPClient(decrypted.url, auth=job_oauth, timeout=330.0) as client:
+            tool_list = await client.list_tools()
+            tools = [MCPTestToolInfo(name=t.name, description=t.description) for t in tool_list]
+
+        # Listing tools frequently succeeds without ever exercising
+        # credentials -- many MCP servers (Gmail's included) only gate
+        # individual tool calls, not `tools/list`. Without forcing a real
+        # call, the OAuth challenge (and thus the login prompt) would never
+        # fire, and the job would report "succeeded" despite never having
+        # obtained a token.
+        #
+        # This verification call deliberately opens a *second, fresh*
+        # connection rather than reusing the one above: streamable-http
+        # sessions are sticky (tied to a server-issued session id from
+        # `initialize`), so a session established anonymously during
+        # tools/list can't be retroactively "upgraded" to authenticated by a
+        # 401 challenge on a later call over the same session -- observed
+        # against Google's endpoint as the tool call hanging indefinitely
+        # even after a real, successful login. A fresh connection means its
+        # own `initialize` is what gets challenged, so the whole session is
+        # authenticated from the start.
+        if tool_call is not None and tool_call.name in [t.name for t in tools]:
+            verified = False
+            try:
+                async with AsyncMCPClient(decrypted.url, auth=job_oauth, timeout=330.0) as verify_client:
+                    # See above: an OAuth failure inside the background
+                    # session task (e.g. a provider rejecting DCR) can leave
+                    # this hanging instead of raising. Bound it so a
+                    # provider-side failure reports promptly instead of
+                    # hanging.
+                    await asyncio.wait_for(
+                        verify_client.call_tool_mcp(
+                            name=tool_call.name, arguments=tool_call.arguments
+                        ),
+                        timeout=60.0,
+                    )
+                    verified = True
+            except Exception:
+                if not verified:
+                    raise
+                # The call itself already completed inside the block above;
+                # this is a teardown-only failure (e.g. a provider rejecting
+                # the session-terminate request) and must not fail a job
+                # that already has what it needs.
+                logger.info(
+                    "MCP OAuth job %s: ignoring post-verification teardown error",
+                    job_id,
+                    exc_info=True,
+                )
+
+        # Record success only once the verification call (if any) has
+        # actually completed -- a 403/error on session teardown afterward
+        # (e.g. a provider rejecting the streamable-http "terminate
+        # session" request) must not wipe out a handshake and tool call
+        # that both genuinely succeeded moments earlier.
+        job.tools = tools
+        job.oauth_state = token_store.export_state()
+        job.status = "succeeded"
+    except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
+        if job.status == "succeeded":
+            # The real work (auth handshake + verification call) already
+            # completed inside the `async with` block; this exception is
+            # from connection teardown afterward (e.g. a provider rejecting
+            # the streamable-http session-terminate request) and must not
+            # overwrite a result the caller already has.
+            logger.info(
+                "MCP OAuth job %s: ignoring post-success teardown error", job_id, exc_info=True
+            )
+            return
+        logger.warning("MCP OAuth job %s failed", job_id, exc_info=True)
+        job.status = "failed"
+        # httpx.HTTPStatusError's str() is just "403 Forbidden for url ..." --
+        # the actual diagnostic (e.g. which API needs enabling) is in the
+        # response body, which callers need to fix a real provider-side
+        # config issue rather than guess at it.
+        detail = str(exc) or type(exc).__name__
+        try:
+            response = getattr(exc, "response", None)
+            # ``.text`` raises ResponseNotRead on an httpx response that was
+            # streamed but never explicitly read -- exactly the case for an
+            # async client's error responses. Read it defensively; this must
+            # never itself raise, or the real error above is lost.
+            if response is not None and getattr(response, "is_stream_consumed", True) is False:
+                await response.aread()
+            body_text = getattr(response, "text", None) if response is not None else None
+            if body_text:
+                detail = f"{detail}\nResponse body: {body_text[:2000]}"
+        except Exception:  # noqa: BLE001 - best-effort enrichment only
+            pass
+        job.error = detail
+        job.error_kind = _classify_oauth_error(exc)
+    finally:
+        job.updated.set()
+
+
+class OAuthStartResponse(BaseModel):
+    ok: bool = True
+    job_id: str | None = None
+    authorization_url: str | None = None
+    error: str | None = None
+    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+
+
+class OAuthStatusResponse(BaseModel):
+    ok: bool = True
+    status: OAuthJobStatus
+    job_id: str
+    authorization_url: str | None = None
+    callback_ready: bool = False
+    tools: list[MCPTestToolInfo] | None = None
+    oauth_state: MCPOAuthStateResponse | None = None
+    error: str | None = None
+    error_kind: Literal["timeout", "connection", "unknown"] | None = None
+
+
+@mcp_router.post(
+    "/oauth/start",
+    response_model=OAuthStartResponse,
+    response_model_exclude_none=True,
+    summary="Start an MCP OAuth authorization job",
+    description=(
+        "Begins a browser-based OAuth flow for a candidate MCP server "
+        "(auth.strategy='oauth2'). Returns a job id and, once the provider "
+        "redirect is known, an authorization_url the caller should open in "
+        "the user's browser. Poll GET /oauth/status/{job_id} for completion."
+    ),
+)
+async def start_mcp_oauth(request: MCPTestRequest, http_request: Request) -> OAuthStartResponse:
+    _prune_oauth_jobs()
+    cipher = get_cipher(http_request)
+    server = request.resolved_server
+    if server.oauth_auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="server.auth.strategy must be 'oauth2' to start an OAuth job",
+        )
+
+    job_id = uuid.uuid4().hex
+    job = _OAuthJob()
+    _OAUTH_JOBS[job_id] = job
+    _OAUTH_TASKS[job_id] = asyncio.create_task(
+        _run_oauth_job(job_id, server, cipher, request.tool_call)
+    )
+
+    # Give the job a moment to reach the authorization redirect (or fail fast
+    # on a bad config) so the first response can usually include the URL.
+    try:
+        await asyncio.wait_for(job.updated.wait(), timeout=_OAUTH_START_WAIT_SECONDS)
+    except TimeoutError:
+        pass
+
+    if job.status == "failed":
+        return OAuthStartResponse(ok=False, job_id=job_id, error=job.error, error_kind=job.error_kind)
+    return OAuthStartResponse(ok=True, job_id=job_id, authorization_url=job.authorization_url)
+
+
+@mcp_router.get(
+    "/oauth/status/{job_id}",
+    response_model=OAuthStatusResponse,
+    response_model_exclude_none=True,
+    summary="Poll an MCP OAuth authorization job",
+)
+async def mcp_oauth_status(job_id: str) -> OAuthStatusResponse:
+    job = _OAUTH_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown or expired OAuth job")
+    return OAuthStatusResponse(
+        ok=job.status != "failed",
+        status=job.status,
+        job_id=job_id,
+        authorization_url=job.authorization_url,
+        callback_ready=job.callback_ready,
+        tools=job.tools,
+        # `has_values` is true even with only client_info (e.g. a
+        # pre-registered Google client_id/secret) and no tokens -- that is
+        # truthy in JS and would be misread by the UI as "session saved".
+        # Only report state that actually holds an access token, so a server
+        # whose tools/list happens to succeed without ever exercising
+        # credentials isn't shown as authenticated when no OAuth handshake
+        # (i.e. no real login) ever completed.
+        oauth_state=(
+            job.oauth_state.to_response()
+            if job.oauth_state is not None
+            and job.oauth_state.tokens is not None
+            and job.oauth_state.tokens.access_token is not None
+            else None
+        ),
+        error=job.error,
+        error_kind=job.error_kind,
+    )
 
 
 @mcp_router.get(

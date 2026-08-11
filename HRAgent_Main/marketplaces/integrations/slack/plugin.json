@@ -17,7 +17,27 @@
   "setup": {
     "auth": {
       "method": "oauth2",
-      "label": "Connect with Slack"
-    }
+      "label": "Connect with Slack",
+      "client_id": "SLACK_CLIENT_ID",
+      "client_secret": "SLACK_CLIENT_SECRET",
+      "hint": "Slack does not support dynamic client registration -- create an app at api.slack.com/apps with a redirect URL of http://localhost:8765/callback, enable MCP server access under the app's Assistant settings, and paste its Client ID/Secret below.",
+      "verify_tool_call": { "name": "list_channels", "arguments": {} }
+    },
+    "fields": [
+      {
+        "name": "SLACK_CLIENT_ID",
+        "label": "Slack App Client ID",
+        "type": "text",
+        "secret": true,
+        "required": true
+      },
+      {
+        "name": "SLACK_CLIENT_SECRET",
+        "label": "Slack App Client Secret",
+        "type": "password",
+        "secret": true,
+        "required": true
+      }
+    ]
   }
 }
