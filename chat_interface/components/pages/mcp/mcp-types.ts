@@ -114,7 +114,7 @@ export interface SetupAuthConfig {
 
 /** Backend-served dynamic setup schema for an MCP integration. */
 export interface McpSetupSchema {
-  auth: SetupAuthConfig
+  auth?: SetupAuthConfig
   fields?: SetupField[]
   instructions?: string
 }

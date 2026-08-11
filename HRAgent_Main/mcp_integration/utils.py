@@ -66,6 +66,7 @@ class DefaultMCPToolProvider:
 def _oauth_auth_from_authentication_config(
     authentication: MCPOAuthAuthentication | None,
     *,
+    mcp_url: str,
     mcp_oauth_token_storage: AsyncKeyValue | None = None,
 ) -> OAuth | None:
     """Build FastMCP OAuth auth from explicit SDK MCP auth metadata."""
@@ -77,16 +78,18 @@ def _oauth_auth_from_authentication_config(
     if client_auth_method is not None:
         additional_client_metadata["token_endpoint_auth_method"] = client_auth_method
 
+    if authentication.client_id is not None:
+        additional_client_metadata["client_id"] = authentication.client_id
+    if authentication.client_secret is not None:
+        additional_client_metadata["client_secret"] = authentication.client_secret.get_secret_value()
+
+    # We must return an OAuth instance, but mcp_url is required.
     return OAuth(
+        mcp_url=mcp_url,
         scopes=authentication.scopes,
         client_name=authentication.client_name or "FastMCP Client",
         token_storage=mcp_oauth_token_storage,
         additional_client_metadata=additional_client_metadata or None,
-        client_metadata_url=authentication.client_metadata_url,
-        client_id=authentication.client_id,
-        client_secret=authentication.client_secret.get_secret_value()
-        if authentication.client_secret is not None
-        else None,
     )
 
 
@@ -116,6 +119,7 @@ def _prepare_mcp_config(
             if mcp_oauth_factory is not None
             else _oauth_auth_from_authentication_config(
                 auth.authentication,
+                mcp_url=getattr(server_spec, "url", "http://localhost"),
                 mcp_oauth_token_storage=mcp_oauth_token_storage,
             )
         )

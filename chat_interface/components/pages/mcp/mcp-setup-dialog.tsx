@@ -27,7 +27,7 @@ function templateToProbeSpec(
 ): mcpApi.McpTestServerSpec | null {
   const t = JSON.parse(JSON.stringify(template)) as Record<string, unknown>
   substitutePlaceholders(t, values)
-  if (t.transport === "stdio") {
+  if (t.transport === "stdio" || (typeof t.command === "string" && t.command)) {
     if (typeof t.command !== "string" || !t.command) return null
     return {
       type: "stdio",
@@ -40,6 +40,11 @@ function templateToProbeSpec(
   const remote: Record<string, unknown> = { type: "http", url: t.url }
   if (t.headers && typeof t.headers === "object" && Object.keys(t.headers as object).length > 0) {
     remote.headers = t.headers
+  }
+  // Preserve auth (especially strategy: "oauth2" + authentication metadata)
+  // so the backend OAuth probe recognizes this as an OAuth server.
+  if (t.auth && typeof t.auth === "object") {
+    remote.auth = t.auth
   }
   return remote as mcpApi.McpTestServerSpec
 }
@@ -92,7 +97,7 @@ export function McpSetupDialog({
   // Whether this server already holds a completed OAuth session (re-setup).
   const savedAuth = connection.config?.auth as Record<string, unknown> | undefined
   const oauthAlready = savedAuth?.strategy === "oauth2" && Boolean(savedAuth.state)
-  const isOAuth = schema?.auth.method === "oauth2"
+  const isOAuth = schema?.auth?.method === "oauth2"
 
   const handleConnectOAuth = async (clientId?: string, clientSecret?: string) => {
     if (!firstTemplate) return null
@@ -118,10 +123,16 @@ export function McpSetupDialog({
     if (!firstTemplate) return { ok: false, detail: "This integration has no MCP server template to probe" }
     const spec = templateToProbeSpec(firstTemplate, setup.values)
     if (!spec) return { ok: false, detail: "Complete the setup fields, then test" }
-    const result = await mcpApi.testServer({ server: spec, timeout: 15 })
-    return result.ok
-      ? { ok: true, detail: `Connection successful. ${result.tools.length} tools discovered` }
-      : { ok: false, detail: result.error }
+    
+    const testTool = (schema as any)?.test_tool as { name: string; arguments?: Record<string, unknown> } | undefined
+    const result = await mcpApi.testServer({ server: spec, timeout: 15, tool_call: testTool })
+    if (!result.ok) {
+      return { ok: false, detail: result.error }
+    }
+    if (result.tool_result?.is_error) {
+      return { ok: false, detail: result.tool_result.text }
+    }
+    return { ok: true, detail: `Connection successful. ${result.tools.length} tools discovered` }
   }
 
   const handleSave = async () => {
@@ -133,13 +144,13 @@ export function McpSetupDialog({
         return
       }
     }
-    if (schema.auth.method === "token" && schema.auth.token_field) {
+    if (schema.auth?.method === "token" && schema.auth.token_field) {
       if (!String(setup.values[schema.auth.token_field] ?? "").trim()) {
         toast.error(`Enter the ${schema.auth.label ?? "access token"} first`)
         return
       }
     }
-    if (schema.auth.method === "oauth2" && !setup.oauthState && !oauthAlready && !savedAuth) {
+    if (schema.auth?.method === "oauth2" && !setup.oauthState && !oauthAlready && !savedAuth) {
       toast.error("Complete the OAuth flow first")
       return
     }
@@ -164,9 +175,9 @@ export function McpSetupDialog({
       // 2) OAuth: keep the completed session (if not already persisted by the
       //    completion callback) and store the client id/secret so re-auth can
       //    reuse them.
-      if (isOAuth) {
+      if (isOAuth && schema?.auth) {
         const envPatch: Record<string, string | null> = {}
-        const { client_id, client_secret } = schema.auth
+        const { client_id, client_secret } = schema.auth as Record<string, string>
         for (const clientField of [client_id, client_secret]) {
           if (clientField && typeof setup.values[clientField] === "string") {
             envPatch[clientField] = setup.values[clientField] as string
@@ -224,7 +235,7 @@ export function McpSetupDialog({
                 Server endpoint
               </p>
               <p className="mt-1 font-mono text-[13px] text-foreground">
-                {firstTemplate.transport === "stdio"
+                {firstTemplate.transport === "stdio" || firstTemplate.command
                   ? `stdio · ${String(firstTemplate.command ?? "")}`
                   : `remote · ${String(firstTemplate.url ?? "")}`}
               </p>

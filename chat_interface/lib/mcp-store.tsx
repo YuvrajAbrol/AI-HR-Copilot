@@ -293,13 +293,13 @@ function applySetupContext(
 /*  Probe helpers                                                      */
 /* ------------------------------------------------------------------ */
 
-function toolsFromProbe(names: string[] | undefined, prev?: McpTool[]): McpTool[] {
-  if (!names) return []
-  return names.map((name) => {
-    const prior = prev?.find((t) => t.name === name)
+function toolsFromProbe(discovered: { name: string; description?: string }[] | undefined, prev?: McpTool[]): McpTool[] {
+  if (!discovered) return []
+  return discovered.map((t) => {
+    const prior = prev?.find((p) => p.name === t.name)
     return {
-      name,
-      description: prior?.description ?? "Exposed by the MCP server",
+      name: t.name,
+      description: t.description || prior?.description || "Exposed by the MCP server",
       enabled: prior?.enabled ?? true,
       permission: prior?.permission ?? "allow",
       calls24h: 0,
@@ -649,7 +649,9 @@ export function McpProvider({ children }: { children: ReactNode }) {
     async (spec: mcpApi.McpTestServerSpec, opts?: { clientId?: string; clientSecret?: string }) => {
       const auth: Record<string, unknown> = { strategy: "oauth2" }
       if (opts?.clientId) {
-        auth.authentication = { client_id: opts.clientId, client_secret: opts.clientSecret ?? "" }
+        auth.authentication = { type: "oauth", client_id: opts.clientId, client_secret: opts.clientSecret ?? "" }
+      } else {
+        auth.authentication = { type: "oauth" }
       }
       spec.auth = auth as NonNullable<mcpApi.McpServerConfig["auth"]>
       try {
@@ -702,6 +704,7 @@ export function McpProvider({ children }: { children: ReactNode }) {
 
   const completeOAuth = useCallback(
     async (jobId: string, onSuccess?: (oauthState: Record<string, unknown>) => void): Promise<"ok" | "failed"> => {
+      let authOpened = false
       const poll = async (): Promise<"ok" | "failed"> => {
         let res: mcpApi.OAuthStatusResponse
         try {
@@ -717,6 +720,12 @@ export function McpProvider({ children }: { children: ReactNode }) {
         if (res.status === "failed") {
           toast.error(res.error ?? "OAuth failed")
           return "failed"
+        }
+        // If the backend's OAuth callback server is ready and there's an auth URL
+        // that wasn't opened yet (e.g., the initial open failed), retry opening it.
+        if (res.callback_ready && res.authorization_url && !authOpened) {
+          window.open(res.authorization_url, "_blank", "noopener,noreferrer")
+          authOpened = true
         }
         return new Promise<"ok" | "failed">((resolve) => setTimeout(() => void poll().then(resolve), 1500))
       }

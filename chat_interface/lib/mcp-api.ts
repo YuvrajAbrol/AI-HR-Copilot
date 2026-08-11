@@ -74,7 +74,7 @@ export interface McpTestRequest {
 export type McpTestResponse =
   | {
       ok: true
-      tools: string[]
+      tools: { name: string; description?: string }[]
       tool_result?: { is_error: boolean; text: string }
       oauth_state?: Record<string, unknown> | null
     }
@@ -94,7 +94,7 @@ export interface OAuthStatusResponse {
   job_id: string
   authorization_url?: string | null
   callback_ready?: boolean
-  tools?: string[] | null
+  tools?: { name: string; description?: string }[] | null
   oauth_state?: Record<string, unknown> | null
   error?: string | null
   error_kind?: "timeout" | "connection" | "unknown" | null
@@ -250,6 +250,10 @@ export async function refreshPlugin(name: string): Promise<{ message: string; pl
 
 export async function marketplaceCatalog(): Promise<{ plugins: MarketplacePluginInfo[] }> {
   return request<{ plugins: MarketplacePluginInfo[] }>("/api/plugins/marketplace")
+}
+
+export async function searchRegistry(q: string): Promise<any> {
+  return request<any>(`/api/mcp/registry/search?q=${encodeURIComponent(q)}`)
 }
 
 /* ------------------------------------------------------------------ */

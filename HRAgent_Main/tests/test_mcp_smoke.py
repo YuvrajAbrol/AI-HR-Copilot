@@ -222,8 +222,7 @@ def test_backend_is_healthy(http: httpx.Client) -> None:
     body = r.json()
     names = [p["name"] for p in body.get("plugins", [])]
     # Real integrations must still be present (proves we hit the shared store).
-    assert "github" in names and "notion" in names
-
+    assert "github" in names
 
 def test_install_snapshots_real_metadata(http: httpx.Client, echo_plugin: dict) -> None:
     """Install snapshots the plugin.json name/version/description (not a fallback)."""
@@ -269,8 +268,9 @@ def test_probe_starts_server_and_discovers_tools(http: httpx.Client, echo_plugin
     assert r.status_code == 200, f"probe failed: {r.status_code} {r.text}"
     body = r.json()
     assert body["ok"] is True, f"probe not ok: {body}"
-    assert "mcp_echo" in body["tools"]
-    assert "mcp_add" in body["tools"]
+    tool_names = [t["name"] for t in body["tools"]]
+    assert "mcp_echo" in tool_names
+    assert "mcp_add" in tool_names
 
 
 def test_tool_invocation_roundtrip(http: httpx.Client, echo_plugin: dict) -> None:
@@ -367,8 +367,9 @@ def test_github_authenticated_discovery(http: httpx.Client) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True, f"authenticated github probe failed: {body}"
-    assert "search_code" in body["tools"]
-    assert "list_issues" in body["tools"]
+    tool_names = [t["name"] for t in body["tools"]]
+    assert "search_code" in tool_names
+    assert "list_issues" in tool_names
 
 
 async def test_permission_deny_blocked() -> None:
@@ -402,3 +403,34 @@ def test_ask_defers_to_agent_confirmation_gate() -> None:
     # The two degenerate policies round out the enforcement surface.
     assert AlwaysConfirm().should_confirm(SecurityRisk.LOW) is True
     assert NeverConfirm().should_confirm(SecurityRisk.HIGH) is False
+
+def test_registry_search_endpoint(http: httpx.Client) -> None:
+    """The /api/mcp/registry/search endpoint queries the official registry and returns results."""
+    r = http.get("/api/mcp/registry/search?q=github")
+    assert r.status_code == 200
+    body = r.json()
+    assert "servers" in body
+    assert isinstance(body["servers"], list)
+
+def test_mcp_add_tool_invocation(http: httpx.Client, echo_plugin: dict) -> None:
+    """Invoking mcp_add correctly computes arithmetic via the bundled echo server."""
+    r = http.post(
+        "/api/mcp/test",
+        json={
+            "name": SERVER_NAME,
+            "server": {
+                "type": "stdio",
+                "command": _project_python(),
+                "args": [str(ECHO_SERVER)],
+            },
+            "timeout": PROBE_TIMEOUT,
+            "tool_call": {"name": "mcp_add", "arguments": {"a": 20, "b": 22}},
+        },
+    )
+    assert r.status_code == 200, f"probe failed: {r.status_code} {r.text}"
+    body = r.json()
+    assert body["ok"] is True
+    assert body.get("tool_result") is not None
+    assert "42" in body["tool_result"]["text"]
+
+

@@ -186,8 +186,8 @@ export function McpSetupForm({
   /** Emitted on every change so the caller can provision with current values. */
   onValues?: (values: McpSetupValues) => void
 }) {
-  const auth = schema.auth
-  const isOAuth = auth.method === "oauth2"
+  const auth = schema.auth ?? ({} as Record<string, unknown>)
+  const isOAuth = (auth as any).method === "oauth2"
   const [values, setValues] = useState<Record<string, string | boolean>>(() => ({ ...initial }))
   const [oauthState, setOauthState] = useState<Record<string, unknown> | null>(null)
   const [oauthBusy, setOauthBusy] = useState(false)
@@ -209,9 +209,9 @@ export function McpSetupForm({
     emit(values, state)
   }
 
-  const clientIdValue = typeof values[auth.client_id ?? ""] === "string" ? (values[auth.client_id ?? ""] as string) : undefined
+  const clientIdValue = typeof values[(auth as any).client_id ?? ""] === "string" ? (values[(auth as any).client_id ?? ""] as string) : undefined
   const clientSecretValue =
-    typeof values[auth.client_secret ?? ""] === "string" ? (values[auth.client_secret ?? ""] as string) : undefined
+    typeof values[(auth as any).client_secret ?? ""] === "string" ? (values[(auth as any).client_secret ?? ""] as string) : undefined
 
   const handleConnect = async () => {
     if (!onConnectOAuth || oauthBusy || connected) return

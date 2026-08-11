@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useMemo, useState, useEffect } from "react"
 import {
   ArrowLeft,
   ArrowRight,
@@ -31,6 +31,7 @@ import type { LucideIcon } from "lucide-react"
 import { useNavigation } from "@/lib/navigation"
 import { useSkills } from "@/lib/skills-store"
 import { useMcp } from "@/lib/mcp-store"
+import { searchRegistry } from "@/lib/mcp-api"
 
 /* ------------------------------------------------------------------ */
 /*  Shared section scaffolding                                         */
@@ -326,14 +327,36 @@ function McpSection({
   loading: boolean
 }) {
   const categories = useMemo(
-    () => ["All", ...Array.from(new Set(catalog.map((l) => l.category)))],
+    () => ["All", ...Array.from(new Set(catalog.map((l) => l.category))), "Registry"],
     [catalog],
   )
   const counts = useMemo(() => {
-    const map: Record<string, number> = { All: catalog.length }
+    const map: Record<string, number> = { All: catalog.length, Registry: 0 }
     for (const l of catalog) map[l.category] = (map[l.category] ?? 0) + 1
     return map
   }, [catalog])
+
+  const [registryResults, setRegistryResults] = useState<any[]>([])
+  const [searchingRegistry, setSearchingRegistry] = useState(false)
+
+  useEffect(() => {
+    if (category === "Registry") {
+      if (!query.trim()) {
+        setRegistryResults([])
+        return
+      }
+      setSearchingRegistry(true)
+      const timeout = setTimeout(() => {
+        searchRegistry(query)
+          .then((data) => {
+            setRegistryResults(data.servers || [])
+          })
+          .catch(console.error)
+          .finally(() => setSearchingRegistry(false))
+      }, 500)
+      return () => clearTimeout(timeout)
+    }
+  }, [category, query])
 
   const q = query.trim().toLowerCase()
   const filtered = useMemo(
@@ -380,12 +403,43 @@ function McpSection({
         items={installedItems.map((l) => ({ icon: l.icon, name: l.name }))}
       />
 
-      {loading ? (
+      {loading || searchingRegistry ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-[184px] animate-pulse rounded-xl border border-border/60 bg-card/30" />
           ))}
         </div>
+      ) : category === "Registry" ? (
+        registryResults.length === 0 ? (
+          query.trim() ? <NoResults /> : (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border/60 bg-card/30 px-6 py-16 text-center">
+              <span className="flex h-11 w-11 items-center justify-center rounded-lg border border-border/60 bg-secondary/60">
+                <Store className="h-5 w-5 text-muted-foreground" />
+              </span>
+              <p className="mt-4 text-sm font-medium text-foreground">Search Official MCP Registry</p>
+              <p className="mt-1 max-w-sm text-[13px] leading-relaxed text-muted-foreground">
+                Type above to discover servers from registry.modelcontextprotocol.io
+              </p>
+            </div>
+          )
+        ) : (
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {registryResults.map((item, i) => (
+              <div key={item.server.name} className="h-full dream-in" style={{ animationDelay: `${Math.min(i, 7) * 40}ms` }}>
+                <MarketplaceMcpCard
+                  icon={Plug}
+                  name={item.server.title || item.server.name}
+                  description={item.server.description || "No description provided."}
+                  category="Registry"
+                  serverType="stdio"
+                  installed={installedNames.has(item.server.name.toLowerCase())}
+                  onInstall={() => onAddCustom()}
+                  onConfigure={() => onAddCustom()}
+                />
+              </div>
+            ))}
+          </div>
+        )
       ) : filtered.length === 0 ? (
         <NoResults />
       ) : (

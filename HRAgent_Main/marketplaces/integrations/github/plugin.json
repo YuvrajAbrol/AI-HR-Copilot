@@ -19,6 +19,12 @@
   ],
   "mcp": true,
   "setup": {
+    "test_tool": {
+      "name": "search_repositories",
+      "arguments": {
+        "query": "test"
+      }
+    },
     "auth": {
       "method": "token",
       "label": "GitHub Personal Access Token",
