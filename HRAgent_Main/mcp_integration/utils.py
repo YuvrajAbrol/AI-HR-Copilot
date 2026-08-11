@@ -1,6 +1,7 @@
 """Utility functions for MCP integration."""
 
 import asyncio
+import concurrent.futures
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
@@ -47,7 +48,7 @@ class MCPToolProvider(Protocol):
         timeout: float = 30.0,
         *,
         on_tools_changed: ToolsChangedCallback | None = None,
-    ) -> MCPClient: ...
+    ) -> "MCPClient | _MultiServerMCPClient": ...
 
 
 class DefaultMCPToolProvider:
@@ -59,7 +60,7 @@ class DefaultMCPToolProvider:
         timeout: float = 30.0,
         *,
         on_tools_changed: ToolsChangedCallback | None = None,
-    ) -> MCPClient:
+    ) -> "MCPClient | _MultiServerMCPClient":
         return create_mcp_tools(mcp_config, timeout, on_tools_changed=on_tools_changed)
 
 
@@ -171,16 +172,18 @@ async def log_handler(message: LogMessage):
 async def _connect_and_list_tools(
     client: MCPClient,
     mcp_config: dict[str, MCPServer] | None = None,
+    tool_name_prefix: str | None = None,
 ) -> None:
     """Connect to MCP server and populate client._tools."""
     await client.connect()
-    await _refresh_tools(client, mcp_config=mcp_config)
+    await _refresh_tools(client, mcp_config=mcp_config, tool_name_prefix=tool_name_prefix)
 
 
 async def _refresh_tools(
     client: MCPClient,
     on_tools_changed: ToolsChangedCallback | None = None,
     mcp_config: dict[str, MCPServer] | None = None,
+    tool_name_prefix: str | None = None,
 ) -> None:
     """Re-list tools from the server and reconcile ``client._tools``.
 
@@ -190,31 +193,50 @@ async def _refresh_tools(
     reported so a running agent can register them via ``add_runtime_tools``.
     Tools that are no longer advertised are dropped from ``client._tools`` but
     are not proactively removed from an agent's tool map.
+
+    ``tool_name_prefix``, when set, renames each tool's agent-facing name to
+    ``{prefix}_{tool_name}`` (matching fastmcp's own multi-server composite
+    transport convention) while the RPC call against ``client`` still uses
+    the tool's real, unprefixed name -- see ``MCPToolDefinition.create``'s
+    ``remote_tool_name``.
     """
-    mcp_type_tools: list[mcp.types.Tool] = await client.list_tools()
+    raw_tools: list[mcp.types.Tool] = await client.list_tools()
+    if tool_name_prefix:
+        listed_tools = [
+            (tool, tool.model_copy(update={"name": f"{tool_name_prefix}_{tool.name}"}))
+            for tool in raw_tools
+        ]
+    else:
+        listed_tools = [(tool, tool) for tool in raw_tools]
+
     existing_by_name = {tool.name: tool for tool in client._tools}
-    server_names = {mcp_tool.name for mcp_tool in mcp_type_tools}
+    server_names = {display_tool.name for _, display_tool in listed_tools}
 
     reconciled: list[MCPToolDefinition] = []
     added: list[MCPToolDefinition] = []
-    for mcp_tool in mcp_type_tools:
-        prior = existing_by_name.get(mcp_tool.name)
+    for remote_tool, display_tool in listed_tools:
+        prior = existing_by_name.get(display_tool.name)
         if prior is not None:
             # Preserve the existing definition so its executor (and the
             # shared MCPClient it closes on shutdown) stays wired up.
             reconciled.append(prior)
             continue
-        # Get tool permission from server config
+        # Get tool permission from server config (keyed by the real,
+        # unprefixed tool name as configured).
         tool_permission = None
         if mcp_config is not None:
             for server_spec in mcp_config.values():
-                if server_spec.tool_permissions and mcp_tool.name in server_spec.tool_permissions:
-                    tool_permission = server_spec.tool_permissions[mcp_tool.name]
+                if (
+                    server_spec.tool_permissions
+                    and remote_tool.name in server_spec.tool_permissions
+                ):
+                    tool_permission = server_spec.tool_permissions[remote_tool.name]
                     break
         tool_sequence = MCPToolDefinition.create(
-            mcp_tool=mcp_tool,
+            mcp_tool=display_tool,
             mcp_client=client,
             tool_permission=tool_permission,
+            remote_tool_name=remote_tool.name,
         )
         reconciled.extend(tool_sequence)
         added.extend(tool_sequence)
@@ -254,11 +276,13 @@ class _ToolListChangedHandler(MessageHandler):
         client: MCPClient,
         on_tools_changed: ToolsChangedCallback | None = None,
         mcp_config: dict[str, MCPServer] | None = None,
+        tool_name_prefix: str | None = None,
     ):
         super().__init__()
         self._client = client
         self._on_tools_changed = on_tools_changed
         self._mcp_config = mcp_config
+        self._tool_name_prefix = tool_name_prefix
         self._refresh_lock = asyncio.Lock()
         self._refresh_tasks: set[asyncio.Task[None]] = set()
 
@@ -281,12 +305,116 @@ class _ToolListChangedHandler(MessageHandler):
             async with self._refresh_lock:
                 if client._closed:
                     return
-                await _refresh_tools(client, self._on_tools_changed, self._mcp_config)
+                await _refresh_tools(
+                    client,
+                    self._on_tools_changed,
+                    self._mcp_config,
+                    self._tool_name_prefix,
+                )
         except Exception:
             logger.warning(
                 "Failed to refresh MCP tools after list_changed notification",
                 exc_info=True,
             )
+
+
+class _MultiServerMCPClient:
+    """Aggregates tools from independently-connected per-server MCP clients.
+
+    Returned by ``create_mcp_tools`` in place of a single ``MCPClient`` when
+    more than one server is configured -- see ``_create_isolated_multi_server_mcp_tools``
+    for why. Exposes just the surface callers actually use (``.tools``, and
+    context-manager/``sync_close`` teardown); each tool still executes
+    against the specific per-server ``MCPClient`` it was created from, so no
+    call routing happens here.
+    """
+
+    def __init__(
+        self, clients: list[MCPClient], tools: list[MCPToolDefinition]
+    ) -> None:
+        self._clients = clients
+        self._tools = tools
+
+    @property
+    def tools(self) -> list[MCPToolDefinition]:
+        return list(self._tools)
+
+    def sync_close(self) -> None:
+        for client in self._clients:
+            try:
+                client.sync_close()
+            except Exception:
+                logger.warning(
+                    "Failed to close MCP client during cleanup", exc_info=True
+                )
+
+    def __enter__(self) -> "_MultiServerMCPClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.sync_close()
+
+
+def _create_isolated_multi_server_mcp_tools(
+    mcp_config: dict[str, MCPServer],
+    timeout: float,
+    *,
+    on_tools_changed: ToolsChangedCallback | None,
+    mcp_oauth_token_storage: AsyncKeyValue | None,
+    mcp_oauth_factory: MCPOAuthFactory | None,
+) -> _MultiServerMCPClient:
+    """Connect to each configured MCP server independently, in parallel.
+
+    fastmcp's own multi-server transport mounts every server on one shared
+    connection, so a single server hanging on auth (e.g. a stale OAuth token
+    triggering a full interactive re-auth flow instead of a refresh) exhausts
+    the shared timeout and zeroes out tools for every *other* configured
+    server too -- one bad connection takes down the whole conversation.
+    Connecting per-server isolates that failure to just the affected server;
+    each server still gets its full ``timeout`` budget, but they run
+    concurrently so the overall wait is bounded by the slowest one, not the
+    sum. Tool names are manually prefixed as ``{server_name}_{tool_name}`` to
+    match the naming convention fastmcp's own composite transport would have
+    used.
+    """
+    clients: list[MCPClient] = []
+    all_tools: list[MCPToolDefinition] = []
+
+    def _connect_one(server_name: str, server_spec: MCPServer) -> MCPClient:
+        result = create_mcp_tools(
+            {server_name: server_spec},
+            timeout,
+            on_tools_changed=on_tools_changed,
+            mcp_oauth_token_storage=mcp_oauth_token_storage,
+            mcp_oauth_factory=mcp_oauth_factory,
+            tool_name_prefix=server_name,
+        )
+        assert isinstance(result, MCPClient)
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(mcp_config), thread_name_prefix="mcp-connect"
+    ) as pool:
+        futures = {
+            pool.submit(_connect_one, server_name, server_spec): server_name
+            for server_name, server_spec in mcp_config.items()
+        }
+        for future in concurrent.futures.as_completed(futures):
+            server_name = futures[future]
+            try:
+                client = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate this server's failure only
+                logger.warning(
+                    "MCP server %r failed to connect; continuing without its "
+                    "tools. Use /api/mcp/test for the per-server error: %s",
+                    server_name,
+                    exc,
+                )
+                continue
+            clients.append(client)
+            all_tools.extend(client.tools)
+
+    return _MultiServerMCPClient(clients, all_tools)
 
 
 def create_mcp_tools(
@@ -296,7 +424,8 @@ def create_mcp_tools(
     on_tools_changed: ToolsChangedCallback | None = None,
     mcp_oauth_token_storage: AsyncKeyValue | None = None,
     mcp_oauth_factory: MCPOAuthFactory | None = None,
-) -> MCPClient:
+    tool_name_prefix: str | None = None,
+) -> MCPClient | _MultiServerMCPClient:
     """Create MCP tools from HRAgents-native MCP server settings.
 
     Returns an MCPClient with tools populated. Use as a context manager:
@@ -312,8 +441,23 @@ def create_mcp_tools(
     tool definitions so progressive-disclosure servers can surface them to an
     agent. The callback runs on the client's background event-loop thread, so
     callers must ensure it is thread-safe (e.g. ``Agent.add_runtime_tools``).
+
+    When ``mcp_config`` has more than one server, each is connected to
+    independently (see ``_create_isolated_multi_server_mcp_tools``) so one
+    server hanging on auth can't block every other server's tools; a
+    ``_MultiServerMCPClient`` aggregating their tools is returned instead of
+    a single ``MCPClient``.
     """
     mcp_config = _require_native_mcp_config(mcp_config)
+    if len(mcp_config) > 1:
+        return _create_isolated_multi_server_mcp_tools(
+            mcp_config,
+            timeout,
+            on_tools_changed=on_tools_changed,
+            mcp_oauth_token_storage=mcp_oauth_token_storage,
+            mcp_oauth_factory=mcp_oauth_factory,
+        )
+
     config = _prepare_mcp_config(
         mcp_config,
         mcp_oauth_token_storage=mcp_oauth_token_storage,
@@ -323,13 +467,18 @@ def create_mcp_tools(
         client=None,  # type: ignore[arg-type]
         on_tools_changed=on_tools_changed,
         mcp_config=mcp_config,
+        tool_name_prefix=tool_name_prefix,
     )
     client = MCPClient(config, log_handler=log_handler, message_handler=handler)
     handler._client = client
 
     try:
         client.call_async_from_sync(
-            _connect_and_list_tools, timeout=timeout, client=client, mcp_config=mcp_config
+            _connect_and_list_tools,
+            timeout=timeout,
+            client=client,
+            mcp_config=mcp_config,
+            tool_name_prefix=tool_name_prefix,
         )
     except TimeoutError as e:
         client.sync_close()

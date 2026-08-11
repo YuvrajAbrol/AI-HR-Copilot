@@ -41,6 +41,7 @@ from mcp_integration.config import (
     MCPOAuthState,
     MCPOAuthStateResponse,
     MCPServer,
+    stamp_absolute_token_expiry,
 )
 from mcp_integration.exceptions import MCPError, MCPTimeoutError
 from runtime.server._secrets_exposure import get_cipher
@@ -662,7 +663,19 @@ async def _run_oauth_job(
         # session" request) must not wipe out a handshake and tool call
         # that both genuinely succeeded moments earlier.
         job.tools = tools
-        job.oauth_state = token_store.export_state()
+        oauth_state = token_store.export_state()
+        tokens_value = oauth_state.get_token_storage_value("tokens")
+        if tokens_value is not None:
+            # Stamp an absolute wall-clock expiry alongside the relative
+            # ``expires_in`` before this state is handed to the frontend and
+            # persisted via `/api/settings` -- that path bypasses
+            # MCPSettingsOAuthTokenStore.put() entirely, so without this the
+            # token would be saved unstamped and look freshly valid forever
+            # on reload. See mcp_integration.config.stamp_absolute_token_expiry.
+            oauth_state = oauth_state.with_token_storage_value(
+                "tokens", stamp_absolute_token_expiry(tokens_value)
+            )
+        job.oauth_state = oauth_state
         job.status = "succeeded"
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
         if job.status == "succeeded":

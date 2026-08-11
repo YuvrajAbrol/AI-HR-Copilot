@@ -338,7 +338,17 @@ class MCPToolDefinition(ToolDefinition[MCPToolAction, MCPToolObservation]):
         mcp_tool: mcp.types.Tool,
         mcp_client: MCPClient,
         tool_permission: Literal["allow", "deny", "ask"] | None = None,
+        remote_tool_name: str | None = None,
     ) -> Sequence["MCPToolDefinition"]:
+        """Build tool definition(s) from an MCP tool listing.
+
+        ``remote_tool_name`` lets ``mcp_tool.name`` (the definition's
+        agent-facing, possibly server-prefixed name) diverge from the name
+        actually used in the RPC call to ``mcp_client`` -- needed when a
+        single-server client's tools are prefixed externally (e.g.
+        ``{server_name}_{tool_name}``) but the underlying transport only
+        knows the tool by its unprefixed name. Defaults to ``mcp_tool.name``.
+        """
         try:
             annotations = (
                 ToolAnnotations.model_validate(
@@ -355,7 +365,7 @@ class MCPToolDefinition(ToolDefinition[MCPToolAction, MCPToolObservation]):
                 annotations=annotations,
                 meta=mcp_tool.meta,
                 executor=MCPToolExecutor(
-                    tool_name=mcp_tool.name,
+                    tool_name=remote_tool_name or mcp_tool.name,
                     client=mcp_client,
                     tool_permission=tool_permission,
                 ),

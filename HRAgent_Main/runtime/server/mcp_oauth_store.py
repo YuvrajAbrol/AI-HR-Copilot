@@ -23,6 +23,8 @@ from mcp_integration.config import (
     MCPOAuthState,
     MCPOAuthTokenStorageField,
     MCPServer,
+    resolve_relative_token_expiry,
+    stamp_absolute_token_expiry,
 )
 from mcp_integration.utils import ToolsChangedCallback, create_mcp_tools
 
@@ -78,6 +80,26 @@ def _state_field_for_fastmcp_key(
     return None
 
 
+def _stamp_absolute_expiry(field: MCPOAuthTokenStorageField, value: Mapping[str, Any]) -> dict[str, Any]:
+    """Stamp an absolute (wall-clock) token expiry, gated to the ``tokens`` field.
+
+    See ``mcp_integration.config.stamp_absolute_token_expiry`` for why this is
+    necessary: FastMCP recomputes ``token_expiry_time`` as ``now + expires_in``
+    every time an OAuth instance loads a persisted token, which makes stale
+    tokens look freshly valid across process restarts.
+    """
+    if field != "tokens":
+        return dict(value)
+    return stamp_absolute_token_expiry(value)
+
+
+def _resolve_relative_expiry(field: MCPOAuthTokenStorageField, value: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a stamped absolute expiry back into a true relative ``expires_in``."""
+    if field != "tokens":
+        return value
+    return resolve_relative_token_expiry(value)
+
+
 class MCPSettingsOAuthTokenStore:
     """FastMCP OAuth token storage persisted inside settings MCP servers."""
 
@@ -98,7 +120,10 @@ class MCPSettingsOAuthTokenStore:
         if match is None:
             return None, None
         _, _, auth = match
-        return (auth.state or MCPOAuthState()).get_token_storage_value(field), None
+        value = (auth.state or MCPOAuthState()).get_token_storage_value(field)
+        if value is None:
+            return None, None
+        return _resolve_relative_expiry(field, value), None
 
     async def get(
         self, key: str, *, collection: str | None = None
@@ -123,7 +148,7 @@ class MCPSettingsOAuthTokenStore:
         field = _state_field_for_fastmcp_key(key, collection)
         if field is None:
             return
-        stored_value = copy.deepcopy(dict(value))
+        stored_value = _stamp_absolute_expiry(field, copy.deepcopy(dict(value)))
 
         def apply_update(settings: PersistedSettings) -> PersistedSettings:
             mcp_config = settings.agent_settings.mcp_config
@@ -334,7 +359,7 @@ class SettingsBackedMCPToolProvider:
         timeout: float = 30.0,
         *,
         on_tools_changed: ToolsChangedCallback | None = None,
-    ) -> MCPClient:
+    ):
         return create_mcp_tools(
             mcp_config,
             timeout,

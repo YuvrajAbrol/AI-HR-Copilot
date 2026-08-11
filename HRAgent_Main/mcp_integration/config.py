@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import time
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, cast
 
@@ -201,6 +202,43 @@ class MCPHeaderAuthCredential(_MCPBaseModel):
 
     def to_http_headers(self) -> dict[str, str] | None:
         return {name: value.get_secret_value() for name, value in self.headers.items()}
+
+
+# OAuth's ``expires_in`` is a *relative* duration, only meaningful measured
+# from the moment the token response was received -- it is not safe to
+# persist verbatim and reinterpret later. FastMCP's OAuth client does exactly
+# that, though: each time a *new* OAuth instance loads a token from storage
+# (e.g. a fresh conversation process), it recomputes token expiry as
+# ``now + expires_in``, which makes an hour-old token look freshly valid for
+# another full hour. The token is then sent to the provider, is genuinely
+# rejected with 401, and -- since the SDK only attempts a refresh *before*
+# sending a request, never in response to a 401 -- falls straight through to
+# a full interactive OAuth flow. That flow hangs headlessly (nobody is there
+# to complete a browser login) and, via the shared multi-server connection
+# timeout, blocks every other configured MCP server's tools too.
+#
+# Stamping the real absolute expiry at write time, and rewriting
+# ``expires_in`` to the true remaining duration at read time, keeps
+# ``is_token_valid()`` accurate across process restarts so the SDK's own
+# proactive refresh-before-send path fires instead of the broken fallback.
+TOKEN_PERSISTED_EXPIRES_AT_KEY = "hragent_persisted_expires_at"
+
+
+def stamp_absolute_token_expiry(token_dict: Mapping[str, Any]) -> dict[str, Any]:
+    """Attach an absolute (wall-clock) expiry alongside a relative ``expires_in``."""
+    stamped = dict(token_dict)
+    expires_in = stamped.get("expires_in")
+    if isinstance(expires_in, (int, float)):
+        stamped[TOKEN_PERSISTED_EXPIRES_AT_KEY] = time.time() + float(expires_in)
+    return stamped
+
+
+def resolve_relative_token_expiry(token_dict: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite a stamped absolute expiry back into a true relative ``expires_in``."""
+    absolute_expires_at = token_dict.pop(TOKEN_PERSISTED_EXPIRES_AT_KEY, None)
+    if isinstance(absolute_expires_at, (int, float)):
+        token_dict["expires_in"] = max(0.0, absolute_expires_at - time.time())
+    return token_dict
 
 
 class MCPOAuthTokenState(_MCPBaseModel):
