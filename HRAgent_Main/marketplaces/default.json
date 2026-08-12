@@ -5,9 +5,9 @@
     {
       "name": "github",
       "source": "./marketplaces/integrations/github",
-      "description": "GitHub — search code/repos, manage issues and pull requests via the official GitHub MCP server (hosted remote).",
+      "description": "GitHub — search code/repos, manage issues and pull requests via the official GitHub MCP server (https://api.githubcopilot.com/mcp/, OAuth 2.0).",
       "category": "Development",
-      "authentication": "Personal Access Token (PAT)",
+      "authentication": "OAuth 2.0 (GitHub App)",
       "tools": [
         "search_repositories",
         "search_code",

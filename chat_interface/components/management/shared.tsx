@@ -309,11 +309,12 @@ export function ItemCard({
   name: string
   description: string
   enabled: boolean
-  onToggle: (checked: boolean) => void
+  /** Required only when `toggle` is omitted and the default enable switch renders. */
+  onToggle?: (checked: boolean) => void
   onOpen: () => void
   menu?: ReactNode
-  /** Optional replacement for the enable switch (e.g. a Setup button for
-   *  servers that still need credentials). */
+  /** Optional replacement for the enable switch (e.g. a Setup or Uninstall
+   *  button for installed servers, which have no soft-disable state). */
   toggle?: ReactNode
 }) {
   return (

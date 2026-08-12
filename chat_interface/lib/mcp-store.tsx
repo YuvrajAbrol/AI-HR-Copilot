@@ -151,7 +151,12 @@ function buildConnection(name: string, server: mcpApi.McpServerConfig, existing?
     // Never faked: a server is "connected" only when it does not need setup.
     // Reachability (whether it actually responds) is tracked separately by
     // `health` from probe results — see applySetupContext for the ${VAR}-ref pass.
-    connected: !oauthUnconfigured && (existing?.connected ?? true),
+    // Must not fall back to `existing?.connected`: a connection that just
+    // finished setup (oauthUnconfigured flips true -> false) would otherwise
+    // inherit its own stale pre-setup `connected: false` from `existing`,
+    // since `false ?? true` is `false`, not `true` — leaving it stuck looking
+    // disconnected until something else forces a re-render.
+    connected: !oauthUnconfigured,
     setupNeeded: oauthUnconfigured,
     missingSecrets: [],
     serverType,
@@ -1028,6 +1033,15 @@ export function McpProvider({ children }: { children: ReactNode }) {
       const base = conn.config as mcpApi.McpServerConfig | undefined
       const merged: mcpApi.McpServerConfig = { ...(base ?? {}), ...patch }
       if (base?.env || patch.env) merged.env = { ...(base?.env ?? {}), ...(patch.env ?? {}) }
+      // auth.authentication (notably `provider`, see oauth_provider_config.py)
+      // must survive a patch that only sets `state` -- a shallow `...patch`
+      // overwrite would otherwise drop it, and the backend needs `provider`
+      // again for any future token refresh against the saved session.
+      const baseAuth = base?.auth as Record<string, unknown> | undefined
+      const patchAuth = patch.auth as Record<string, unknown> | undefined
+      if (baseAuth?.authentication && patchAuth && !patchAuth.authentication) {
+        merged.auth = { ...baseAuth, ...patchAuth, authentication: baseAuth.authentication } as typeof merged.auth
+      }
       await patchConfig({ [connId]: merged })
     },
     [connections, patchConfig],

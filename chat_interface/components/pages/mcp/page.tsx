@@ -51,7 +51,6 @@ export function McpConnectionsPage() {
     reconnectingId,
     rotatingId,
     load,
-    toggleConnection,
     testConnection,
     reconnectConnection,
     disconnectAll,
@@ -229,7 +228,6 @@ export function McpConnectionsPage() {
               name={c.name}
               description={c.description}
               enabled={c.connected}
-              onToggle={() => toggleConnection(c.id)}
               onOpen={() => setDetailId(c.id)}
               toggle={
                 c.setupNeeded ? (
@@ -242,7 +240,21 @@ export function McpConnectionsPage() {
                     <KeyRound className="h-3.5 w-3.5" />
                     Setup
                   </Button>
-                ) : undefined
+                ) : (
+                  // Installed servers are always provisioned in settings.mcp_config —
+                  // there is no "temporarily off" state to toggle, only installed or
+                  // not (see the deleteConnection comment on why a soft-disable
+                  // switch doesn't actually exist here). Uninstall is the honest action.
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setDeleteTarget(c)}
+                    className="h-8 gap-2 text-[13px] text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Uninstall
+                  </Button>
+                )
               }
               menu={
                 <DropdownMenu>
@@ -307,7 +319,6 @@ export function McpConnectionsPage() {
         onOpenChange={(open) => {
           if (!open) setDetailId(null)
         }}
-        onToggle={toggleConnection}
         onTest={testConnection}
         onReconnect={reconnectConnection}
         onSetup={openSetup}

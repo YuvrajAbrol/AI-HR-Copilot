@@ -636,6 +636,24 @@ class _JobOAuth(FastMCPOAuth):
         self._job.updated.set()
         self._job.updated = asyncio.Event()
 
+    # GitHub's token endpoint (github.com/login/oauth/access_token) replies
+    # application/x-www-form-urlencoded unless the request explicitly asks
+    # for JSON -- the MCP SDK's OAuth2 client (mcp.client.auth.oauth2) never
+    # sends that header, so its `OAuthToken.model_validate_json` call on a
+    # form-encoded body fails with "Invalid JSON". Every other provider we
+    # support (Google, Slack, Linear) already replies JSON regardless, so
+    # this only needs to widen the Accept header, never change behavior for
+    # them. See https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#response
+    async def _exchange_token_authorization_code(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        request = await super()._exchange_token_authorization_code(*args, **kwargs)
+        request.headers["Accept"] = "application/json"
+        return request
+
+    async def _refresh_token(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        request = await super()._refresh_token(*args, **kwargs)
+        request.headers["Accept"] = "application/json"
+        return request
+
 
 def _classify_oauth_error(exc: BaseException) -> OAuthErrorKind:
     if isinstance(exc, MCPOAuthProviderNotConfiguredError):

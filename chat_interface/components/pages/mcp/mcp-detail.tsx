@@ -99,7 +99,6 @@ const HISTORY_META: Record<HistoryEvent["kind"], { icon: typeof Plug; className:
 export interface McpDetailPanelProps {
   connection: McpConnection | null
   onOpenChange: (open: boolean) => void
-  onToggle: (id: string) => void
   onTest: (id: string) => void
   onReconnect: (id: string) => void
   onSetup: (conn: McpConnection) => void
@@ -119,7 +118,6 @@ export interface McpDetailPanelProps {
 export function McpDetailPanel({
   connection,
   onOpenChange,
-  onToggle,
   onTest,
   onReconnect,
   onSetup,
@@ -230,12 +228,14 @@ export function McpDetailPanel({
                 Set up credentials
               </Button>
             ) : (
-              <div className="flex items-center gap-2">
-                <Switch checked={connection.connected} onCheckedChange={() => onToggle(connection.id)} aria-label={`Toggle ${connection.name}`} />
-                <span className="text-[13px] text-muted-foreground">
-                  {connection.connected ? "Connected" : "Disconnected"}
-                </span>
-              </div>
+              <Button
+                variant="ghost"
+                onClick={() => onDelete(connection)}
+                className="gap-2 text-muted-foreground hover:text-destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+                Uninstall
+              </Button>
             )}
             <div className="flex items-center gap-2">
               <Button variant="ghost" onClick={() => onReconnect(connection.id)} disabled={reconnecting} className="gap-2">

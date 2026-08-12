@@ -11,5 +11,11 @@
     "_comment": "api.slack.com/apps -> Create New App -> OAuth & Permissions -> add redirect URL http://localhost:8765/callback, and enable MCP server access under the app's Assistant settings.",
     "client_id": "YOUR_SLACK_CLIENT_ID",
     "client_secret": "YOUR_SLACK_CLIENT_SECRET"
+  },
+
+  "github": {
+    "_comment": "github.com/settings/developers -> OAuth Apps -> New OAuth App. Set the Authorization callback URL to http://localhost:8765/callback. Used by github.",
+    "client_id": "YOUR_GITHUB_CLIENT_ID",
+    "client_secret": "YOUR_GITHUB_CLIENT_SECRET"
   }
 }
