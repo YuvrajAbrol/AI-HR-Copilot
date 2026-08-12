@@ -343,10 +343,6 @@ export function McpConnectionsPage() {
         onOpenChange={(open) => {
           if (!open) setSetupConnId(null)
         }}
-        onEdit={(c) => {
-          setSetupConnId(null)
-          openEdit(c)
-        }}
       />
 
       <ConfirmDialog

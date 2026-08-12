@@ -204,17 +204,16 @@ class MCPHeaderAuthCredential(_MCPBaseModel):
         return {name: value.get_secret_value() for name, value in self.headers.items()}
 
 
-# Fixed local callback port for every OAuth job. Providers that validate
-# redirect_uri by exact match (Slack) rather than allowing any localhost
-# loopback port (Google Desktop-app clients, Linear's DCR) require the
-# integration's registered app to use this exact
-# http://localhost:{port}/callback value -- see
-# config/oauth_providers.example.json, where that registration is documented
-# for each provider. 8765 is arbitrary but fixed so it only needs documenting
-# once. One OAuth job runs at a time (see
-# runtime.server.mcp_router._supersede_active_oauth_jobs), so a shared port
-# is fine.
-MCP_OAUTH_CALLBACK_PORT = 8765
+# The fixed local callback port/URL for every OAuth job now lives in the
+# centralized OAuth config file (see
+# mcp_integration.oauth_provider_config.get_oauth_callback_port /
+# get_oauth_redirect_uri) instead of a hardcoded constant here, so it can be
+# changed per environment (dev/staging/prod) without touching code. Providers
+# that validate redirect_uri by exact match (Slack) rather than allowing any
+# localhost loopback port (Google Desktop-app clients, Linear's DCR) require
+# the integration's registered app to use that exact value. One OAuth job
+# runs at a time (see runtime.server.mcp_router._supersede_active_oauth_jobs),
+# so a single shared port is fine.
 
 
 # OAuth's ``expires_in`` is a *relative* duration, only meaningful measured
