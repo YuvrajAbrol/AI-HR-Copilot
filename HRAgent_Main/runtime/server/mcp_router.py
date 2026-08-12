@@ -38,7 +38,6 @@ from starlette import status
 from mcp_integration import create_mcp_tools
 from mcp_integration.client import MCPClient
 from mcp_integration.config import (
-    MCP_OAUTH_CALLBACK_PORT,
     MCPAuthCredential,
     MCPOAuthState,
     MCPOAuthStateResponse,
@@ -46,7 +45,7 @@ from mcp_integration.config import (
     stamp_absolute_token_expiry,
 )
 from mcp_integration.exceptions import MCPError, MCPTimeoutError
-from mcp_integration.oauth_provider_config import get_oauth_provider_credentials
+from mcp_integration.oauth_provider_config import get_oauth_callback_port, get_oauth_provider_credentials
 from runtime.server._secrets_exposure import get_cipher
 from runtime.server.mcp_oauth_store import InMemoryMCPOAuthTokenStore
 from runtime.telemetry.logger import get_logger
@@ -462,9 +461,19 @@ async def test_mcp_server(
 
 _OAUTH_JOB_TTL_SECONDS = 15 * 60
 _OAUTH_START_WAIT_SECONDS = 3.0
-# See mcp_integration.config.MCP_OAUTH_CALLBACK_PORT for why this is fixed
-# rather than per-job.
-_OAUTH_CALLBACK_PORT = MCP_OAUTH_CALLBACK_PORT
+
+
+def _oauth_callback_port() -> int:
+    """The shared local callback port every OAuth job binds.
+
+    Read from the centralized OAuth config file on every call (see
+    ``mcp_integration.oauth_provider_config``) rather than frozen once at
+    import time, so editing that file's ``redirect_uri`` takes effect
+    without a server restart -- same as provider client id/secret edits.
+    One OAuth job runs at a time (see _supersede_active_oauth_jobs), so a
+    single shared port is fine.
+    """
+    return get_oauth_callback_port()
 
 OAuthJobStatus = Literal["pending", "authorizing", "succeeded", "failed"]
 # "not_configured": the integration needs a backend-configured OAuth provider
@@ -604,13 +613,13 @@ async def _cancel_oauth_job(
         # except block; nothing more to do here.
         pass
 
-    if not await _wait_for_port_release(_OAUTH_CALLBACK_PORT, timeout=10.0):
+    if not await _wait_for_port_release(_oauth_callback_port(), timeout=10.0):
         logger.warning(
             "MCP OAuth job %s: callback port %d still in use 10s after "
             "cancellation -- the next job to start may fail with "
             "'port_busy' until it clears.",
             job_id,
-            _OAUTH_CALLBACK_PORT,
+            _oauth_callback_port(),
         )
 
 
@@ -661,7 +670,7 @@ def _classify_oauth_error(exc: BaseException) -> OAuthErrorKind:
     if isinstance(exc, SystemExit):
         # Uvicorn's own Server.startup() calls sys.exit(1) on a bind
         # failure -- the shared OAuth callback port (see
-        # MCP_OAUTH_CALLBACK_PORT) is still held by a job that hasn't
+        # _oauth_callback_port) is still held by a job that hasn't
         # finished releasing it yet, most often right after cancelling a
         # previous one. See _cancel_oauth_job's port-release wait.
         return "port_busy"
@@ -738,9 +747,9 @@ async def _run_oauth_job(
             # any provider that validates redirect_uri by exact match against
             # a pre-registered value (e.g. Slack) rather than allowing any
             # localhost loopback port (Google Desktop-app clients, Linear's
-            # DCR). Provider apps must register
-            # http://localhost:{_OAUTH_CALLBACK_PORT}/callback exactly.
-            callback_port=_OAUTH_CALLBACK_PORT,
+            # DCR). Provider apps must register the centralized config
+            # file's redirect_uri exactly (see oauth_provider_config.py).
+            callback_port=_oauth_callback_port(),
         )
 
         # Providers that don't support dynamic client registration (e.g.
@@ -846,7 +855,7 @@ async def _run_oauth_job(
         # shared OAuth callback port. Left uncaught, it propagates out of
         # this background task as an unhandled BaseException, which can take
         # the whole server process down with it instead of just failing this
-        # one job -- see MCP_OAUTH_CALLBACK_PORT and _cancel_oauth_job.
+        # one job -- see _oauth_callback_port and _cancel_oauth_job.
         if job.status == "succeeded":
             # The real work (auth handshake + verification call) already
             # completed inside the `async with` block; this exception is
@@ -986,11 +995,11 @@ async def start_mcp_oauth(request: MCPTestRequest, http_request: Request) -> OAu
     # _cancel_oauth_job. Confirm the port is actually free rather than
     # finding out via a crashed job (see _classify_oauth_error's
     # "port_busy" case).
-    if not await _wait_for_port_release(_OAUTH_CALLBACK_PORT, timeout=8.0):
+    if not await _wait_for_port_release(_oauth_callback_port(), timeout=8.0):
         return OAuthStartResponse(
             ok=False,
             error=(
-                f"The OAuth callback port ({_OAUTH_CALLBACK_PORT}) is still "
+                f"The OAuth callback port ({_oauth_callback_port()}) is still "
                 "in use by a previous authorization attempt. Please wait a "
                 "moment and try again."
             ),

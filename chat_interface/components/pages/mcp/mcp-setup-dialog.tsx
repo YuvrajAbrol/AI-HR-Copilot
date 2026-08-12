@@ -1,14 +1,26 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Loader2, Server, X, Zap } from "lucide-react"
+import { Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import * as mcpApi from "@/lib/mcp-api"
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { substitutePlaceholders, useMcp } from "@/lib/mcp-store"
-import { McpSetupForm, setupComplete } from "./mcp-setup-form"
+import * as mcpApi from "@/lib/mcp-api"
+import { SetupFields } from "./mcp-setup-form"
 import type { LibraryServer, McpConnection } from "./mcp-types"
+
+/** A few names don't title-case cleanly from their kebab-case id. */
+const DISPLAY_NAME_OVERRIDES: Record<string, string> = {
+  github: "GitHub",
+  "microsoft-365": "Microsoft 365",
+}
+
+/** "google-drive" -> "Google Drive", used only for the button label
+ *  ("Connect Gmail") — never shown as a description. */
+function displayName(id: string): string {
+  return DISPLAY_NAME_OVERRIDES[id] ?? id.split("-").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ")
+}
 
 /** Convert an integration's .mcp.json server template (after ${VAR}
  *  substitution) into a POST /api/mcp/test spec. Uses the same normalization
@@ -42,47 +54,39 @@ function templateToProbeSpec(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Setup / configure a marketplace MCP                                */
-/*                                                                       */
-/*  One minimal, consistent popup for every integration: a title, a     */
-/*  small Test control next to Close, whatever tiny auth-specific block  */
-/*  McpSetupForm renders, and a single "Connect" button that does the    */
-/*  right thing for that auth method (start the OAuth redirect, or save  */
-/*  the entered token/fields) — see handleConnect below.                 */
+/*  Setup popup — deliberately just "Setup" + one button for every      */
+/*  OAuth integration. All app credentials (client id/secret, redirect  */
+/*  URIs, ...) are pre-configured on the backend (see                   */
+/*  oauth_provider_config.py) and never appear here. The single button  */
+/*  starts as "Connect {name}" (the OAuth redirect); once that browser   */
+/*  flow settles it becomes "Save", which closes the popup. Postgres is  */
+/*  the only exception — it genuinely needs a connection string, so its  */
+/*  field(s) render above that same single button.                       */
 /* ------------------------------------------------------------------ */
 
 export function McpSetupDialog({
   server,
   connection,
   onOpenChange,
-  onEdit,
 }: {
   /** The installed integration (setup schema + .mcp.json templates). */
   server: LibraryServer | null
   /** The provisioned server on the MCP page. */
   connection: McpConnection | null
   onOpenChange: (open: boolean) => void
-  /** Opens the existing full-config edit popup for this server. */
-  onEdit?: (conn: McpConnection) => void
 }) {
   const { saveSecret, patchServerConfig, startOAuth, completeOAuth, load } = useMcp()
   const isOpen = server !== null && connection !== null
 
   const [values, setValues] = useState<Record<string, string | boolean>>({})
   const [oauthState, setOauthState] = useState<Record<string, unknown> | null>(null)
-  const [oauthBusy, setOauthBusy] = useState(false)
-  // Set when the user explicitly asks to redo an already-saved OAuth session
-  // — reveals the connect control again instead of the static "Connected" line.
-  const [reauthing, setReauthing] = useState(false)
-  const [connecting, setConnecting] = useState(false)
-  const [testing, setTesting] = useState(false)
+  const [busy, setBusy] = useState(false)
 
   // Reset per-target state when the user switches integration/server without
   // closing the dialog in between.
   useEffect(() => {
     setValues({})
     setOauthState(null)
-    setReauthing(false)
   }, [server?.id, connection?.id])
 
   if (!server || !connection) return null
@@ -92,200 +96,95 @@ export function McpSetupDialog({
   const serverNames = Object.keys(templates)
   const firstTemplate = serverNames.length > 0 ? (templates[serverNames[0]] as Record<string, unknown> | undefined) : undefined
 
-  // Whether this server already holds a completed OAuth session (re-setup).
-  const savedAuth = connection.config?.auth as Record<string, unknown> | undefined
-  const oauthAlready = savedAuth?.strategy === "oauth2" && Boolean(savedAuth.state)
-  const isOAuth = schema?.auth?.method === "oauth2"
-  const oauthConnectedNow = (oauthState !== null || oauthAlready) && !reauthing
-  // Drives the Connect button's disabled state.
-  const canConnect = schema ? setupComplete(schema, values, oauthState, oauthAlready) : false
+  const auth = schema?.auth
+  const isOAuth = auth?.method === "oauth2"
+  const providerReady = !isOAuth || !auth?.provider || auth.provider_configured === true
+  const oauthJustConnected = oauthState !== null
+  const name = displayName(connection.id)
+  const nonAuthFields = (schema?.fields ?? []).filter((f) => f.name !== auth?.token_field)
 
-  const runOAuthFlow = async (): Promise<boolean> => {
-    if (!firstTemplate) return false
+  const runOAuthFlow = async () => {
+    if (!firstTemplate) return
     const spec = templateToProbeSpec(firstTemplate, values)
-    if (!spec) return false
-    setOauthBusy(true)
+    if (!spec) return
+    setBusy(true)
     try {
       // No client_id/secret here — those are backend deployment config (see
       // oauth_provider_config.py), resolved server-side from the template's
       // `provider` tag. The frontend only ever asks the provider to connect.
-      const jobId = await startOAuth(spec, { verifyToolCall: schema?.auth?.verify_tool_call })
-      if (!jobId) return false
+      const jobId = await startOAuth(spec, { verifyToolCall: auth?.verify_tool_call })
+      if (!jobId) return
       const result = await completeOAuth(jobId, (state) => {
         setOauthState(state)
         void patchServerConfig(connection.id, { auth: { strategy: "oauth2", state } })
       })
-      return result === "ok"
+      if (result !== "ok") toast.error("Failed to connect — try again")
     } finally {
-      setOauthBusy(false)
+      setBusy(false)
     }
   }
 
-  const handleTest = async () => {
-    if (!firstTemplate) {
-      toast.error("This integration has no MCP server template to probe")
-      return
-    }
-    const spec = templateToProbeSpec(firstTemplate, values)
-    if (!spec) {
-      toast.error("Complete the required fields, then test")
-      return
-    }
-    setTesting(true)
+  const handleSave = async () => {
+    setBusy(true)
     try {
-      const testTool = (schema as any)?.test_tool as { name: string; arguments?: Record<string, unknown> } | undefined
-      const result = await mcpApi.testServer({ server: spec, timeout: 15, tool_call: testTool })
-      if (!result.ok) {
-        toast.error(result.error ?? "Connection failed")
-        return
-      }
-      if (result.tool_result?.is_error) {
-        toast.error(result.tool_result.text ?? "Connection failed")
-        return
-      }
-      toast.success(`Connection successful — ${result.tools.length} tools discovered`)
-    } finally {
-      setTesting(false)
-    }
-  }
-
-  /** Save every collected value (token, connection string, …) as a global
-   *  secret so ${VAR} placeholders resolve at conversation build time. */
-  const saveValues = async () => {
-    let persisted = false
-    for (const [name, value] of Object.entries(values)) {
-      if (typeof value === "string" && value.trim()) {
-        try {
-          await saveSecret(name, value.trim())
-          persisted = true
-        } catch (error) {
-          console.warn(`Failed to store secret ${name}:`, error)
-        }
-      }
-    }
-    return persisted
-  }
-
-  const handleConnect = async () => {
-    if (!schema) return
-    // Re-verify the same check the button's `disabled` state uses, so a
-    // stale click (e.g. a field cleared right before submit) still gets a
-    // precise message instead of silently doing nothing.
-    for (const field of schema.fields ?? []) {
-      if (field.required && !String(values[field.name] ?? "").trim()) {
-        toast.error(`${field.label} is required`)
-        return
-      }
-    }
-    if (schema.auth?.method === "token" && schema.auth.token_field) {
-      if (!String(values[schema.auth.token_field] ?? "").trim()) {
-        toast.error(`Enter the ${schema.auth.label ?? "access token"} first`)
-        return
-      }
-    }
-
-    setConnecting(true)
-    try {
-      if (isOAuth) {
-        if (oauthConnectedNow) {
-          onOpenChange(false)
-          return
-        }
-        const ok = await runOAuthFlow()
-        if (!ok) {
-          toast.error("Failed to connect — try again")
+      for (const field of nonAuthFields) {
+        if (field.required && !String(values[field.name] ?? "").trim()) {
+          toast.error(`${field.label} is required`)
           return
         }
       }
-
-      const persisted = await saveValues()
-      if (!persisted && !isOAuth && connection.setupNeeded) {
-        toast.error("Nothing to save — enter the credentials this server needs first")
-        return
+      // Non-OAuth fields (Postgres' connection string, etc.) — persisted as
+      // global secrets so ${VAR} placeholders resolve at conversation build time.
+      for (const [fieldName, value] of Object.entries(values)) {
+        if (typeof value === "string" && value.trim()) {
+          await saveSecret(fieldName, value.trim())
+        }
       }
-
       await load()
-      toast.success(`${connection.name} connected`)
+      toast.success(`${name} connected`)
       onOpenChange(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Failed to connect ${connection.name}`)
+      toast.error(error instanceof Error ? error.message : `Failed to save ${name}`)
     } finally {
-      setConnecting(false)
+      setBusy(false)
     }
   }
 
-  const busy = connecting || oauthBusy
+  const handleClick = () => {
+    if (isOAuth && !oauthJustConnected) void runOAuthFlow()
+    else void handleSave()
+  }
+
+  const label = !isOAuth ? "Connect" : oauthJustConnected ? "Save" : busy ? "Connecting…" : `Connect ${name}`
+  const disabled = busy || (isOAuth && !providerReady)
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton={false} className="gap-0 border-border/60 bg-card p-0 sm:max-w-sm">
-        <DialogHeader className="flex-row items-center justify-between gap-3 space-y-0 border-b border-border/60 px-5 py-3.5">
-          <DialogTitle className="font-heading text-[15px]">Connect</DialogTitle>
-          <div className="flex items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              onClick={handleTest}
-              disabled={testing}
-              aria-label="Test connection"
-              className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            >
-              {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
-            </Button>
-            <DialogClose asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="Close"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </DialogClose>
-          </div>
+      <DialogContent className="gap-0 border-border/60 bg-card p-0 sm:max-w-xs">
+        <DialogHeader className="border-b border-border/60 px-5 py-3.5">
+          <DialogTitle className="font-heading text-[15px]">Setup</DialogTitle>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4 px-5 py-4">
-          {schema ? (
-            <McpSetupForm
-              key={`${server.id}-${connection.id}`}
-              schema={schema}
-              values={values}
-              onValues={setValues}
-              oauthConnected={oauthConnectedNow}
-              oauthBusy={oauthBusy}
-              reauthing={reauthing}
-              onReconnect={() => setReauthing(true)}
-              disabled={busy}
-            />
-          ) : (
-            <p className="text-[13px] leading-relaxed text-muted-foreground">
-              No dynamic setup for this server — use Edit for full configuration.
-            </p>
-          )}
-        </div>
+        {(!isOAuth || !providerReady) && (
+          <div className="px-5 pt-5">
+            {!providerReady ? (
+              <p className="text-[11px] leading-snug text-amber-400">
+                Needs an administrator to finish backend configuration first.
+              </p>
+            ) : (
+              <SetupFields fields={nonAuthFields} values={values} onChange={setValues} disabled={busy} />
+            )}
+          </div>
+        )}
 
-        <DialogFooter className="border-t border-border/60 px-5 py-3.5 sm:justify-between">
+        <DialogFooter className="px-5 py-5">
           <Button
-            type="button"
-            variant="ghost"
-            onClick={() => onEdit?.(connection)}
-            disabled={busy}
-            className="gap-1.5 text-[12px] text-muted-foreground"
-          >
-            <Server className="h-3.5 w-3.5" />
-            Edit full configuration
-          </Button>
-          <Button
-            onClick={handleConnect}
-            disabled={busy || !canConnect}
-            title={!canConnect ? "Complete the required fields above first" : undefined}
-            className="gap-2 bg-primary text-primary-foreground hover:opacity-90"
+            onClick={handleClick}
+            disabled={disabled}
+            className="w-full gap-2 bg-primary text-primary-foreground hover:opacity-90"
           >
             {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-            {oauthConnectedNow ? "Done" : busy ? "Connecting…" : "Connect"}
+            {label}
           </Button>
         </DialogFooter>
       </DialogContent>
