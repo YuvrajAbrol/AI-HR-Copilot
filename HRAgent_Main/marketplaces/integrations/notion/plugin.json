@@ -1,9 +1,9 @@
 {
   "name": "notion",
   "version": "1.0.0",
-  "description": "Notion integration — pages, databases and blocks via the official Notion MCP server.",
+  "description": "Notion integration — pages, databases and blocks via the official Notion MCP server (https://mcp.notion.com/mcp, OAuth).",
   "category": "Productivity",
-  "authentication": "Integration Token (ntn_)",
+  "authentication": "OAuth 2.0",
   "tools": [
     "API-get-user",
     "API-get-users",
@@ -33,10 +33,13 @@
   "mcp": true,
   "setup": {
     "auth": {
-      "method": "token",
-      "label": "Notion Integration Token",
-      "token_field": "NOTION_TOKEN",
-      "hint": "Create an internal integration at notion.so/my-integrations and copy the `ntn_` token."
+      "method": "oauth2",
+      "label": "Connect with Notion",
+      "hint": "Authorizes via Notion's OAuth flow. No setup needed here -- just connect.",
+      "verify_tool_call": {
+        "name": "API-post-search",
+        "arguments": {}
+      }
     }
   }
 }

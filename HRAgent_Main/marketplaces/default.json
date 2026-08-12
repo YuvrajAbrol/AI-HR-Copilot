@@ -160,9 +160,9 @@
     {
       "name": "notion",
       "source": "./marketplaces/integrations/notion",
-      "description": "Notion — pages, databases and blocks via the official Notion MCP server (npx @notionhq/notion-mcp-server).",
+      "description": "Notion — pages, databases and blocks via the official Notion MCP server (https://mcp.notion.com/mcp, OAuth).",
       "category": "Productivity",
-      "authentication": "Integration Token (ntn_)",
+      "authentication": "OAuth 2.0",
       "tools": [
         "API-get-user",
         "API-get-users",
