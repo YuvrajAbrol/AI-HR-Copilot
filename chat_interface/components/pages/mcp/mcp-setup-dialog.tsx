@@ -1,20 +1,12 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { CheckCircle2, KeyRound, Loader2, Server, ShieldCheck, Zap } from "lucide-react"
+import { Loader2, Server, X, Zap } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { Tag } from "@/components/management/shared"
+import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import * as mcpApi from "@/lib/mcp-api"
-import { substitutePlaceholders, useMcp, type McpSetupValues } from "@/lib/mcp-store"
+import { substitutePlaceholders, useMcp } from "@/lib/mcp-store"
 import { McpSetupForm, setupComplete } from "./mcp-setup-form"
 import type { LibraryServer, McpConnection } from "./mcp-types"
 
@@ -51,10 +43,12 @@ function templateToProbeSpec(
 
 /* ------------------------------------------------------------------ */
 /*  Setup / configure a marketplace MCP                                */
-/*  Schema-driven credentials (token / OAuth / env) against the         */
-/*  integration's .mcp.json template. Persists global secrets + OAuth   */
-/*  sessions through the same backend the runtime uses, then re-loads   */
-/*  connections so setup status is recomputed from truth.               */
+/*                                                                       */
+/*  One minimal, consistent popup for every integration: a title, a     */
+/*  small Test control next to Close, whatever tiny auth-specific block  */
+/*  McpSetupForm renders, and a single "Connect" button that does the    */
+/*  right thing for that auth method (start the OAuth redirect, or save  */
+/*  the entered token/fields) — see handleConnect below.                 */
 /* ------------------------------------------------------------------ */
 
 export function McpSetupDialog({
@@ -74,17 +68,21 @@ export function McpSetupDialog({
   const { saveSecret, patchServerConfig, startOAuth, completeOAuth, load } = useMcp()
   const isOpen = server !== null && connection !== null
 
-  const [setup, setSetup] = useState<McpSetupValues>({ values: {} })
-  const [saving, setSaving] = useState(false)
-  const [testState, setTestState] = useState<{ state: "idle" | "testing" | "ok" | "fail"; detail?: string }>({
-    state: "idle",
-  })
+  const [values, setValues] = useState<Record<string, string | boolean>>({})
+  const [oauthState, setOauthState] = useState<Record<string, unknown> | null>(null)
+  const [oauthBusy, setOauthBusy] = useState(false)
+  // Set when the user explicitly asks to redo an already-saved OAuth session
+  // — reveals the connect control again instead of the static "Connected" line.
+  const [reauthing, setReauthing] = useState(false)
+  const [connecting, setConnecting] = useState(false)
+  const [testing, setTesting] = useState(false)
 
   // Reset per-target state when the user switches integration/server without
   // closing the dialog in between.
   useEffect(() => {
-    setSetup({ values: {} })
-    setTestState({ state: "idle" })
+    setValues({})
+    setOauthState(null)
+    setReauthing(false)
   }, [server?.id, connection?.id])
 
   if (!server || !connection) return null
@@ -98,242 +96,197 @@ export function McpSetupDialog({
   const savedAuth = connection.config?.auth as Record<string, unknown> | undefined
   const oauthAlready = savedAuth?.strategy === "oauth2" && Boolean(savedAuth.state)
   const isOAuth = schema?.auth?.method === "oauth2"
-  // Drives the Save button's disabled state — the same check handleSave
-  // re-verifies before submitting, so the button reflects reality instead
-  // of only failing after a click.
-  const canSave = schema ? setupComplete(schema, setup.values, setup.oauthState, oauthAlready) : false
+  const oauthConnectedNow = (oauthState !== null || oauthAlready) && !reauthing
+  // Drives the Connect button's disabled state.
+  const canConnect = schema ? setupComplete(schema, values, oauthState, oauthAlready) : false
 
-  const handleConnectOAuth = async () => {
-    if (!firstTemplate) return null
-    const spec = templateToProbeSpec(firstTemplate, setup.values)
-    if (!spec) return null
-    // No client_id/secret here — those are backend deployment config (see
-    // oauth_provider_config.py), resolved server-side from the template's
-    // `provider` tag. The frontend only ever asks the provider to connect.
-    return startOAuth(spec, { verifyToolCall: schema?.auth?.verify_tool_call })
+  const runOAuthFlow = async (): Promise<boolean> => {
+    if (!firstTemplate) return false
+    const spec = templateToProbeSpec(firstTemplate, values)
+    if (!spec) return false
+    setOauthBusy(true)
+    try {
+      // No client_id/secret here — those are backend deployment config (see
+      // oauth_provider_config.py), resolved server-side from the template's
+      // `provider` tag. The frontend only ever asks the provider to connect.
+      const jobId = await startOAuth(spec, { verifyToolCall: schema?.auth?.verify_tool_call })
+      if (!jobId) return false
+      const result = await completeOAuth(jobId, (state) => {
+        setOauthState(state)
+        void patchServerConfig(connection.id, { auth: { strategy: "oauth2", state } })
+      })
+      return result === "ok"
+    } finally {
+      setOauthBusy(false)
+    }
   }
-
-  /* Persist the completed session into this server's config the moment the
-     browser flow settles — the session is usable even if the user closes the
-     dialog without hitting Save. */
-  const handleCompleteOAuth = async (jobId: string, onSuccess?: (state: Record<string, unknown>) => void) => {
-    return completeOAuth(jobId, (state) => {
-      void patchServerConfig(connection.id, { auth: { strategy: "oauth2", state } })
-      onSuccess?.(state)
-    })
-  }
-
-  const handleTestResult = (ok: boolean, detail: string) =>
-    setTestState(ok ? { state: "ok", detail } : { state: "fail", detail })
 
   const handleTest = async () => {
-    if (!firstTemplate) return { ok: false, detail: "This integration has no MCP server template to probe" }
-    const spec = templateToProbeSpec(firstTemplate, setup.values)
-    if (!spec) return { ok: false, detail: "Complete the setup fields, then test" }
-    
-    const testTool = (schema as any)?.test_tool as { name: string; arguments?: Record<string, unknown> } | undefined
-    const result = await mcpApi.testServer({ server: spec, timeout: 15, tool_call: testTool })
-    if (!result.ok) {
-      return { ok: false, detail: result.error }
+    if (!firstTemplate) {
+      toast.error("This integration has no MCP server template to probe")
+      return
     }
-    if (result.tool_result?.is_error) {
-      return { ok: false, detail: result.tool_result.text }
+    const spec = templateToProbeSpec(firstTemplate, values)
+    if (!spec) {
+      toast.error("Complete the required fields, then test")
+      return
     }
-    return { ok: true, detail: `Connection successful. ${result.tools.length} tools discovered` }
+    setTesting(true)
+    try {
+      const testTool = (schema as any)?.test_tool as { name: string; arguments?: Record<string, unknown> } | undefined
+      const result = await mcpApi.testServer({ server: spec, timeout: 15, tool_call: testTool })
+      if (!result.ok) {
+        toast.error(result.error ?? "Connection failed")
+        return
+      }
+      if (result.tool_result?.is_error) {
+        toast.error(result.tool_result.text ?? "Connection failed")
+        return
+      }
+      toast.success(`Connection successful — ${result.tools.length} tools discovered`)
+    } finally {
+      setTesting(false)
+    }
   }
 
-  const handleSave = async () => {
+  /** Save every collected value (token, connection string, …) as a global
+   *  secret so ${VAR} placeholders resolve at conversation build time. */
+  const saveValues = async () => {
+    let persisted = false
+    for (const [name, value] of Object.entries(values)) {
+      if (typeof value === "string" && value.trim()) {
+        try {
+          await saveSecret(name, value.trim())
+          persisted = true
+        } catch (error) {
+          console.warn(`Failed to store secret ${name}:`, error)
+        }
+      }
+    }
+    return persisted
+  }
+
+  const handleConnect = async () => {
     if (!schema) return
-    // Same check the Save button's `disabled` state uses (see `canSave`
-    // below) — re-run here so a stale click (e.g. a field cleared right
-    // before submit) still gets a precise, field-specific message instead
-    // of silently doing nothing.
+    // Re-verify the same check the button's `disabled` state uses, so a
+    // stale click (e.g. a field cleared right before submit) still gets a
+    // precise message instead of silently doing nothing.
     for (const field of schema.fields ?? []) {
-      if (field.required && !String(setup.values[field.name] ?? "").trim()) {
+      if (field.required && !String(values[field.name] ?? "").trim()) {
         toast.error(`${field.label} is required`)
         return
       }
     }
     if (schema.auth?.method === "token" && schema.auth.token_field) {
-      if (!String(setup.values[schema.auth.token_field] ?? "").trim()) {
+      if (!String(values[schema.auth.token_field] ?? "").trim()) {
         toast.error(`Enter the ${schema.auth.label ?? "access token"} first`)
         return
       }
     }
-    if (schema.auth?.method === "oauth2" && !setup.oauthState && !oauthAlready) {
-      toast.error("Complete the OAuth flow first")
-      return
-    }
 
-    setSaving(true)
+    setConnecting(true)
     try {
-      let persisted = false
-
-      // 1) Persist every collected value as a global secret so ${VAR}
-      //    placeholders in the template resolve at conversation build time.
-      for (const [name, value] of Object.entries(setup.values)) {
-        if (typeof value === "string" && value.trim()) {
-          try {
-            await saveSecret(name, value.trim())
-            persisted = true
-          } catch (error) {
-            console.warn(`Failed to store secret ${name}:`, error)
-          }
+      if (isOAuth) {
+        if (oauthConnectedNow) {
+          onOpenChange(false)
+          return
+        }
+        const ok = await runOAuthFlow()
+        if (!ok) {
+          toast.error("Failed to connect — try again")
+          return
         }
       }
 
-      // 2) OAuth: keep the completed session (if not already persisted by
-      //    the completion callback).
-      if (isOAuth && setup.oauthState) {
-        await patchServerConfig(connection.id, { auth: { strategy: "oauth2", state: setup.oauthState } })
-        persisted = true
-      }
-
-      if (!persisted && connection.setupNeeded) {
+      const persisted = await saveValues()
+      if (!persisted && !isOAuth && connection.setupNeeded) {
         toast.error("Nothing to save — enter the credentials this server needs first")
         return
       }
 
       await load()
-      toast.success(`${connection.name} configured`, {
-        description: "Credentials saved — the server is ready to use",
-      })
+      toast.success(`${connection.name} connected`)
       onOpenChange(false)
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : `Failed to configure ${connection.name}`)
+      toast.error(error instanceof Error ? error.message : `Failed to connect ${connection.name}`)
     } finally {
-      setSaving(false)
+      setConnecting(false)
     }
   }
 
-  const Icon = server.icon
+  const busy = connecting || oauthBusy
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] gap-0 overflow-y-auto border-border/60 bg-card p-0 sm:max-w-lg">
-        <DialogHeader className="border-b border-border/60 px-6 py-5">
-          <div className="flex items-center gap-3">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-secondary/60">
-              <Icon className="h-5 w-5 text-foreground" />
-            </span>
-            <div>
-              <DialogTitle className="font-heading text-lg">Set up {connection.name}</DialogTitle>
-              <DialogDescription className="text-muted-foreground">{server.description}</DialogDescription>
-            </div>
+      <DialogContent showCloseButton={false} className="gap-0 border-border/60 bg-card p-0 sm:max-w-sm">
+        <DialogHeader className="flex-row items-center justify-between gap-3 space-y-0 border-b border-border/60 px-5 py-3.5">
+          <DialogTitle className="font-heading text-[15px]">Connect</DialogTitle>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={handleTest}
+              disabled={testing}
+              aria-label="Test connection"
+              className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            >
+              {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+            </Button>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="Close"
+                className="h-7 w-7 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </DialogClose>
           </div>
         </DialogHeader>
 
-        <div className="flex flex-col gap-5 px-6 py-6">
-          {/* Endpoint summary — read-only here; full editing stays in Edit. */}
-          {firstTemplate && (
-            <div className="rounded-lg border border-border/60 bg-secondary/30 px-4 py-3">
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                Server endpoint
-              </p>
-              <p className="mt-1 font-mono text-[13px] text-foreground">
-                {firstTemplate.transport === "stdio" || firstTemplate.command
-                  ? `stdio · ${String(firstTemplate.command ?? "")}`
-                  : `remote · ${String(firstTemplate.url ?? "")}`}
-              </p>
-            </div>
-          )}
-
-          {/* What is still missing — drives the "Setup needed" state. */}
-          {connection.missingSecrets.length > 0 && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
-              <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-              <div className="min-w-0">
-                <p className="text-[13px] font-medium text-amber-300">Credentials required</p>
-                <div className="mt-1 flex flex-wrap gap-1.5">
-                  {connection.missingSecrets.map((name) => (
-                    <Tag key={name} className="border-amber-500/30 bg-amber-500/10 text-amber-300/90">
-                      {name}
-                    </Tag>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
+        <div className="flex flex-col gap-4 px-5 py-4">
           {schema ? (
             <McpSetupForm
               key={`${server.id}-${connection.id}`}
               schema={schema}
-              oauthConnected={oauthAlready}
-              disabled={saving}
-              onConnectOAuth={handleConnectOAuth}
-              onCompleteOAuth={handleCompleteOAuth}
-              onValues={setSetup}
+              values={values}
+              onValues={setValues}
+              oauthConnected={oauthConnectedNow}
+              oauthBusy={oauthBusy}
+              reauthing={reauthing}
+              onReconnect={() => setReauthing(true)}
+              disabled={busy}
             />
           ) : (
             <p className="text-[13px] leading-relaxed text-muted-foreground">
-              This integration has no dynamic setup schema. Configure credentials from the configuration tab, or open
-              Edit for the full server settings.
+              No dynamic setup for this server — use Edit for full configuration.
             </p>
           )}
-
-          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-secondary/30 px-4 py-3">
-            <div className="min-w-0">
-              <p className="text-[13px] font-medium text-foreground">Validate connection</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {testState.state === "ok" && (
-                  <span className="flex items-center gap-1 text-emerald-400">
-                    <CheckCircle2 className="h-3 w-3" />
-                    {testState.detail}
-                  </span>
-                )}
-                {testState.state === "fail" && <span className="text-red-400">{testState.detail}</span>}
-                {testState.state === "idle" && "Probes the server with the current credentials"}
-                {testState.state === "testing" && "Connecting…"}
-              </p>
-            </div>
-            {testState.state === "testing" ? (
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-            ) : (
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() =>
-                  handleTest().then((r) => {
-                    handleTestResult(r.ok, r.detail)
-                  })
-                }
-                disabled={saving}
-                className="gap-2 border border-border/60 bg-secondary/60 hover:bg-secondary"
-              >
-                <Zap className="h-4 w-4" />
-                Test
-              </Button>
-            )}
-          </div>
         </div>
 
-        <DialogFooter className="border-t border-border/60 px-6 py-4">
-          <div className="flex w-full items-center justify-between gap-2">
-            <Button
-              variant="ghost"
-              onClick={() => onEdit?.(connection)}
-              disabled={saving}
-              className="gap-2 text-muted-foreground"
-            >
-              <Server className="h-4 w-4" />
-              Edit full configuration
-            </Button>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleSave}
-                disabled={saving || !canSave}
-                title={!canSave ? "Complete the required fields above first" : undefined}
-                className="gap-2 bg-primary text-primary-foreground hover:opacity-90"
-              >
-                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-                {saving ? "Saving…" : "Save & configure"}
-              </Button>
-            </div>
-          </div>
+        <DialogFooter className="border-t border-border/60 px-5 py-3.5 sm:justify-between">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onEdit?.(connection)}
+            disabled={busy}
+            className="gap-1.5 text-[12px] text-muted-foreground"
+          >
+            <Server className="h-3.5 w-3.5" />
+            Edit full configuration
+          </Button>
+          <Button
+            onClick={handleConnect}
+            disabled={busy || !canConnect}
+            title={!canConnect ? "Complete the required fields above first" : undefined}
+            className="gap-2 bg-primary text-primary-foreground hover:opacity-90"
+          >
+            {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+            {oauthConnectedNow ? "Done" : busy ? "Connecting…" : "Connect"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

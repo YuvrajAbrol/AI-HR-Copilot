@@ -1,18 +1,17 @@
 "use client"
 
 import { useState } from "react"
-import { AlertTriangle, CheckCircle2, ExternalLink, Eye, EyeOff, Loader2, ShieldCheck, Sparkles, Zap } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react"
 import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import type { McpSetupSchema, SetupField } from "./mcp-types"
-import type { McpSetupValues } from "@/lib/mcp-store"
 
 /* ------------------------------------------------------------------ */
-/*  Shared field shell                                                 */
+/*  Shared field shell — small and unstyled beyond the input itself,   */
+/*  so every auth method renders at the same visual weight.            */
 /* ------------------------------------------------------------------ */
 
 function Field({
@@ -27,13 +26,13 @@ function Field({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-1.5">
       <Label className="text-[13px] font-medium text-foreground">
         {label}
         {required && <span className="ml-1 text-red-400">*</span>}
       </Label>
       {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {hint && <p className="text-[11px] leading-snug text-muted-foreground">{hint}</p>}
     </div>
   )
 }
@@ -72,21 +71,12 @@ function SecretInput({
   )
 }
 
-function HintBanner({ text }: { text: string }) {
-  return (
-    <div className="flex items-start gap-2 rounded-lg border border-border/60 bg-secondary/30 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
-      <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span>{text}</span>
-    </div>
-  )
-}
-
 /* ------------------------------------------------------------------ */
 /*  Schema field renderer (text / password / textarea / select / bool) */
-/*  Only ever used for genuinely user-owned values now: a personal     */
-/*  access token, or a per-deployment connection string. OAuth app     */
-/*  credentials never reach this — see provider/provider_configured    */
-/*  on SetupAuthConfig.                                                */
+/*  Only ever used for genuinely user-owned values: a personal access  */
+/*  token, or a per-deployment connection string. OAuth app credentials*/
+/*  never reach this — see provider/provider_configured on             */
+/*  SetupAuthConfig.                                                    */
 /* ------------------------------------------------------------------ */
 
 export function SetupFields({
@@ -105,7 +95,7 @@ export function SetupFields({
   const set = (name: string, value: string | boolean) => onChange({ ...values, [name]: value })
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       {fields.map((field) => {
         const raw = values[field.name]
         const current = typeof raw === "boolean" ? (raw ? "true" : "false") : (raw as string | undefined) ?? ""
@@ -167,12 +157,12 @@ export function SetupFields({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Validation — exported so the dialog can gate Save/Connect the same */
-/*  way the form does, instead of only failing after a click.          */
+/*  Validation — exported so the dialog can gate the Connect button    */
+/*  the same way the form does, instead of only failing after a click. */
 /* ------------------------------------------------------------------ */
 
 /** Names of every schema field the auth block itself renders (so the
- *  trailing "Additional settings" list doesn't duplicate them). */
+ *  trailing field list doesn't duplicate them). */
 function authOwnedFieldNames(schema: McpSetupSchema): Set<string> {
   const auth = schema.auth
   const names = new Set<string>()
@@ -212,7 +202,7 @@ export function authSatisfied(
 }
 
 /** True once every schema-required field is filled and, for OAuth, the
- *  session is connected. Drives the Save button. */
+ *  session is connected. Drives the Connect button. */
 export function setupComplete(
   schema: McpSetupSchema,
   values: Record<string, string | boolean>,
@@ -240,203 +230,109 @@ export function oauthProviderReady(schema: McpSetupSchema): boolean {
 
 /* ------------------------------------------------------------------ */
 /*  Full per-integration setup form                                    */
-/*  Renders one consistent structure for every integration. OAuth app   */
-/*  credentials are never collected here — they're backend deployment   */
-/*  configuration (see oauth_provider_config.py); this form only ever   */
-/*  asks for values that belong to the person setting it up: a personal */
-/*  access token, or a per-deployment connection string.                */
+/*  One minimal, consistent shell for every integration — the only     */
+/*  thing that differs between MCPs is which small block renders here   */
+/*  (a token field, an OAuth status line, a couple of env fields, or    */
+/*  nothing at all). The actual "Connect" action lives in the dialog's  */
+/*  single footer button, not in this form, so every integration shares */
+/*  the exact same primary control regardless of auth method.           */
 /* ------------------------------------------------------------------ */
 
 export function McpSetupForm({
   schema,
   initial = {},
-  oauthConnected = false,
-  disabled = false,
-  onConnectOAuth,
-  onCompleteOAuth,
+  values: controlledValues,
   onValues,
+  oauthConnected = false,
+  oauthBusy = false,
+  reauthing = false,
+  onReconnect,
+  disabled = false,
 }: {
   schema: McpSetupSchema
   /** Prefill values (e.g. env already saved on a re-install). */
   initial?: Record<string, string>
+  /** Controlled values, owned by the dialog so the footer button can read them. */
+  values: Record<string, string | boolean>
+  /** Emitted on every change. */
+  onValues: (values: Record<string, string | boolean>) => void
   /** True when the server already holds a completed OAuth session. */
   oauthConnected?: boolean
+  /** True while an OAuth job is in flight (started by the dialog). */
+  oauthBusy?: boolean
+  /** True when the user asked to redo an already-connected OAuth session. */
+  reauthing?: boolean
+  /** Ask the dialog to reset a connected session back to the connect state. */
+  onReconnect?: () => void
   disabled?: boolean
-  /** Start the OAuth flow for this integration; resolves with the job id. */
-  onConnectOAuth?: () => Promise<string | null>
-  /** Poll an OAuth job; the success callback receives the persisted session. */
-  onCompleteOAuth?: (jobId: string, onSuccess?: (state: Record<string, unknown>) => void) => Promise<"ok" | "failed">
-  /** Emitted on every change so the caller can provision with current values. */
-  onValues?: (values: McpSetupValues) => void
 }) {
   const auth = schema.auth ?? ({ method: "none" } as McpSetupSchema["auth"])
   const isOAuth = auth?.method === "oauth2"
-  const [values, setValues] = useState<Record<string, string | boolean>>(() => ({ ...initial }))
-  const [oauthState, setOauthState] = useState<Record<string, unknown> | null>(null)
-  const [oauthBusy, setOauthBusy] = useState(false)
-  const [oauthStarted, setOauthStarted] = useState(false)
-  // Set when the user explicitly asks to redo an already-saved OAuth
-  // session (e.g. it went stale and the server started rejecting it) —
-  // reveals the Connect button again instead of the static "Connected" pill.
-  const [reauthing, setReauthing] = useState(false)
-
-  const connected = (oauthState !== null || oauthConnected) && !reauthing
+  const connected = isOAuth && oauthConnected && !reauthing
   const providerReady = oauthProviderReady(schema)
 
-  const emit = (next: Record<string, string | boolean>, state: Record<string, unknown> | null = oauthState) =>
-    onValues?.({ values: next, oauthState: state, isOAuth })
-
-  const handleValues = (next: Record<string, string | boolean>) => {
-    setValues(next)
-    emit(next)
-  }
-
-  const handleOAuthState = (state: Record<string, unknown>) => {
-    setOauthState(state)
-    setOauthBusy(false)
-    setReauthing(false)
-    emit(values, state)
-  }
-
-  const handleConnect = async () => {
-    if (!onConnectOAuth || oauthBusy || connected || !providerReady) return
-    setOauthBusy(true)
-    setOauthStarted(true)
-    try {
-      const jobId = await onConnectOAuth()
-      if (!jobId) {
-        setOauthBusy(false)
-        return
-      }
-      // Poll until the browser-coordinated flow settles (success or failure).
-      await onCompleteOAuth?.(jobId, handleOAuthState)
-      setOauthBusy(false)
-    } catch {
-      setOauthBusy(false)
-    }
-  }
+  const handleValues = (next: Record<string, string | boolean>) => onValues(next)
 
   const ownedNames = authOwnedFieldNames(schema)
   const remainingFields = (schema.fields ?? []).filter((f) => !ownedNames.has(f.name))
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* --- step: authenticate (token field or OAuth connect) --- */}
+    <div className="flex flex-col gap-4">
+      {/* --- auth block: exactly one of these renders --- */}
       {auth?.method === "token" && auth.token_field && (
-        <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-secondary/20 p-4">
-          <div className="flex items-center gap-2">
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-semibold text-foreground">
-              1
-            </span>
-            <p className="text-[13px] font-semibold text-foreground">Authenticate</p>
-          </div>
-          {auth.hint && <p className="pl-7 text-xs leading-relaxed text-muted-foreground">{auth.hint}</p>}
-          <div className="pl-7">
-            <Field label={auth.label ?? "Access token"} required>
-              <SecretInput
-                value={(values[auth.token_field] as string | undefined) ?? ""}
-                onChange={(v) => handleValues({ ...values, [auth.token_field!]: v })}
-                placeholder="••••••••••••••••"
-                disabled={disabled}
-              />
-            </Field>
-          </div>
-        </div>
+        <Field label={auth.label ?? "Access token"} hint={auth.hint} required>
+          <SecretInput
+            value={(controlledValues[auth.token_field] as string | undefined) ?? initial[auth.token_field] ?? ""}
+            onChange={(v) => handleValues({ ...controlledValues, [auth.token_field!]: v })}
+            placeholder="••••••••••••••••"
+            disabled={disabled}
+          />
+        </Field>
       )}
 
       {isOAuth && !providerReady && (
-        <div className="flex items-start gap-2.5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-          <div className="min-w-0">
-            <p className="text-[13px] font-medium text-amber-300">Needs administrator setup</p>
-            <p className="mt-0.5 text-xs leading-relaxed text-amber-300/80">
-              This integration requires a {auth?.provider} OAuth application configured on the
-              backend before anyone can connect. Ask your administrator to add it to the server's
-              OAuth provider configuration.
-            </p>
-          </div>
-        </div>
+        <p className="text-[11px] leading-snug text-amber-400">
+          Needs an administrator to configure {auth?.provider} OAuth on the backend first.
+        </p>
       )}
 
-      {isOAuth && (
-        <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-secondary/20 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[13px] font-medium text-foreground">{auth?.label ?? "Connect"}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                {connected ? (
-                  <span className="flex items-center gap-1 text-emerald-400">
-                    <ShieldCheck className="h-3 w-3" />
-                    Connected
-                  </span>
-                ) : oauthBusy ? (
-                  <span className="flex items-center gap-1">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    Waiting for authorization…
-                  </span>
-                ) : oauthStarted ? (
-                  "Open the provider tab and approve access."
-                ) : !providerReady ? (
-                  "Not available until an administrator configures this integration."
-                ) : (
-                  auth?.hint ?? "Authorize this integration to reach your account."
-                )}
-              </p>
-            </div>
+      {isOAuth && providerReady && (
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[13px] text-muted-foreground">
             {connected ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-400">
-                  <CheckCircle2 className="h-3 w-3" />
-                  Connected
-                </span>
-                {oauthConnected && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setReauthing(true)}
-                    disabled={disabled}
-                    className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                  >
-                    Re-authenticate
-                  </Button>
-                )}
-              </div>
+              <span className="flex items-center gap-1.5 text-emerald-400">
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Connected
+              </span>
+            ) : oauthBusy ? (
+              <span className="flex items-center gap-1.5">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Waiting for authorization…
+              </span>
             ) : (
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={handleConnect}
-                disabled={oauthBusy || disabled || !providerReady}
-                className="gap-2 border border-border/60 bg-secondary/60 hover:bg-secondary"
-              >
-                {oauthBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}
-                Connect
-              </Button>
+              auth?.label ?? "Not connected"
             )}
-          </div>
+          </p>
+          {connected && oauthConnected && onReconnect && (
+            <button
+              type="button"
+              onClick={onReconnect}
+              disabled={disabled}
+              className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              Reconnect
+            </button>
+          )}
         </div>
       )}
 
-      {auth?.method === "none" && (
-        <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-secondary/20 px-4 py-3 text-[13px] text-muted-foreground">
-          <Sparkles className="h-4 w-4 shrink-0 text-emerald-400" />
-          No credentials needed — this server is ready to use.
-        </div>
-      )}
+      {auth?.method === "none" && <p className="text-[13px] text-muted-foreground">No credentials needed.</p>}
 
-      {auth?.method === "env" && auth.hint && <HintBanner text={auth.hint} />}
+      {auth?.method === "env" && auth.hint && <p className="text-[11px] leading-snug text-muted-foreground">{auth.hint}</p>}
 
       {/* --- remaining schema fields (env values, connection strings, …) --- */}
       {remainingFields.length > 0 && (
-        <div className="flex flex-col gap-3">
-          {(isOAuth || auth?.method === "token") && (
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-              Additional settings
-            </p>
-          )}
-          <SetupFields fields={remainingFields} values={values} onChange={handleValues} disabled={disabled} />
-        </div>
+        <SetupFields fields={remainingFields} values={controlledValues} onChange={handleValues} disabled={disabled} />
       )}
     </div>
   )
