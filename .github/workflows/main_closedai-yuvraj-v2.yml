@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -23,21 +23,21 @@ jobs:
         with:
           node-version: '22.x'
 
-       - name: npm install, build, and test
-         run: |
-           npm ci
-           npm run build
-           npm run test --if-present
-           cp -r public .next/standalone/public || true
-           mkdir -p .next/standalone/.next
-           cp -r .next/static .next/standalone/.next/static
-      
-       - name: Upload artifact for deployment job
-         uses: actions/upload-artifact@v4
-         with:
-           name: node-app
-           path: .next/standalone
-           include-hidden-files: true
+      - name: npm install, build, and test
+        run: |
+          npm ci
+          npm run build
+          npm run test --if-present
+          cp -r public .next/standalone/public || true
+          mkdir -p .next/standalone/.next
+          cp -r .next/static .next/standalone/.next/static
+
+      - name: Upload artifact for deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-app
+          path: .next/standalone
+          include-hidden-files: true
 
   deploy:
     runs-on: ubuntu-latest
